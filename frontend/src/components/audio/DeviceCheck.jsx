@@ -160,20 +160,23 @@ export default function DeviceCheck({
       source.connect(gainNode);
       gainNode.connect(analyser);
 
-      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+      const dataArray = new Uint8Array(analyser.fftSize);
       accumulatedSpeechMsRef.current = 0;
       lastSampleTimeRef.current = performance.now();
 
       const monitorLevel = () => {
         if (!analyserRef.current) return;
-        analyserRef.current.getByteFrequencyData(dataArray);
+        // Waveform RMS: averaging all frequency bins dilutes speech, which sits
+        // below ~4 kHz, and kept normal voices under the threshold.
+        analyserRef.current.getByteTimeDomainData(dataArray);
 
-        let sum = 0;
+        let sumSquares = 0;
         for (let i = 0; i < dataArray.length; i += 1) {
-          sum += dataArray[i];
+          const sample = (dataArray[i] - 128) / 128;
+          sumSquares += sample * sample;
         }
-        const avg = sum / dataArray.length;
-        const normalized = Math.min(100, Math.round((avg / 128) * 100));
+        const rms = Math.sqrt(sumSquares / dataArray.length);
+        const normalized = Math.min(100, Math.round(rms * 300));
         setMicLevel(normalized);
 
         const now = performance.now();
