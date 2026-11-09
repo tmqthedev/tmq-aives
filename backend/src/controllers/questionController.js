@@ -91,6 +91,15 @@ class QuestionController {
     } catch (error) { next(error); }
   };
 
+  discardRevision = async (req, res, next) => {
+    try {
+      const { expectedVersion, revisionId } = req.body || {};
+      res.json(await this.questionService.discardRevision(this._parseQuestionId(req.params.id), {
+        expectedVersion, revisionId,
+      }, req.user));
+    } catch (error) { next(error); }
+  };
+
   remove = async (req, res, next) => {
     try {
       const questionId = this._parseQuestionId(req.params.id);

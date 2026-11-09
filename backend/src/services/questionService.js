@@ -387,6 +387,28 @@ class QuestionService {
     });
   }
 
+  async discardRevision(questionId, { expectedVersion, revisionId } = {}, user) {
+    this._assertRevisionActor(user);
+    if (!Number.isInteger(expectedVersion) || expectedVersion < 1) throw validationError('expectedVersion must be a positive integer.');
+    if (!Number.isInteger(revisionId) || revisionId < 1) throw validationError('revisionId must be a positive integer.');
+    return this.db.withTransaction(async (client) => {
+      const active = await this.repository.findByIdForUpdate(questionId, client);
+      if (!active) throw this._notFound();
+      await this._assertTopicAccess(user, active.topic_id);
+      const revision = await this.repository.findPendingRevision(questionId, client);
+      if (!revision || revision.version !== expectedVersion
+        || revision.question_revision_id !== revisionId) {
+        throw this._revisionError('REVISION_CONFLICT', 'The question or revision changed; reload before discarding.');
+      }
+      const discarded = await this.repository.markRevisionDiscarded(revision.question_revision_id, user.id, client);
+      if (!discarded) throw this._revisionError('REVISION_CONFLICT', 'The revision could not be discarded.');
+      return { revision: this._revisionView({ ...revision, status: 'DISCARDED' }), row: active };
+    }).then(async ({ row, ...out }) => {
+      await this._publishQuestion(row, 'updated');
+      return out;
+    });
+  }
+
   async deleteQuestion(questionId, user) {
     const existing = await this.repository.findById(questionId);
     if (!existing) {

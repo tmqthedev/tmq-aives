@@ -89,6 +89,16 @@ class QuestionRepository {
     return result.rows[0] || null;
   }
 
+  async markRevisionDiscarded(revisionId, actorId, client) {
+    const result = await client.query(
+      `UPDATE question_revision SET status = 'DISCARDED', reviewed_by = $2,
+       discarded_at = now(), updated_at = now()
+       WHERE question_revision_id = $1 AND status = 'PENDING_REVIEW' RETURNING *`,
+      [revisionId, actorId],
+    );
+    return result.rows[0] || null;
+  }
+
   async findAll() {
     const result = await this.db.query('SELECT * FROM question ORDER BY question_id ASC');
     return result.rows;

@@ -23,8 +23,11 @@ describe('lecturer revision REST API with real service and transactional fakes',
   function publish(body, auth = cookie()) {
     return request(app).post('/api/questions/1/revision/publish').set('Origin', 'http://localhost:5173').set('Cookie', auth).send(body);
   }
+  function discard(body, auth = cookie()) {
+    return request(app).post('/api/questions/1/revision/discard').set('Origin', 'http://localhost:5173').set('Cookie', auth).send(body);
+  }
   test('all revision endpoints require authentication and lecturer role; students receive no knowledge', async () => {
-    for (const [method, path] of [['get', '/api/questions/1/revision'], ['put', '/api/questions/1/revision'], ['post', '/api/questions/1/revision/publish']]) {
+    for (const [method, path] of [['get', '/api/questions/1/revision'], ['put', '/api/questions/1/revision'], ['post', '/api/questions/1/revision/publish'], ['post', '/api/questions/1/revision/discard']]) {
       const noAuth = await request(app)[method](path).set('Origin', 'http://localhost:5173');
       expect(noAuth.status).toBe(401);
       for (const role of ['STUDENT', 'ADMIN']) {
@@ -82,6 +85,16 @@ describe('lecturer revision REST API with real service and transactional fakes',
     const csrf = await request(app).put('/api/questions/1/revision').set('Origin', 'https://untrusted.invalid').set('Cookie', cookie()).send({});
     expect(csrf.status).toBe(403);
     expect(csrf.body.code).toBe('FORBIDDEN_ORIGIN');
+  });
+  test('discard releases the pending revision without changing the approved question', async () => {
+    const created = await save({ patch: { referenceAnswer: 'Unwanted draft' }, expectedVersion: 0 });
+    expect((await discard({ revisionId: created.body.id + 1, expectedVersion: 1 })).body.code).toBe('REVISION_CONFLICT');
+    const result = await discard({ revisionId: created.body.id, expectedVersion: 1 });
+    expect(result.status).toBe(200);
+    expect(result.body.revision.status).toBe('DISCARDED');
+    expect(ctx.state().revision.status).toBe('DISCARDED');
+    expect(ctx.state().active.reference_answer).toBe('Original answer');
+    expect((await request(app).get('/api/questions/1/revision').set('Cookie', cookie())).body).toBeNull();
   });
   test('existing active PUT guard remains enforced', async () => {
     const response = await request(app).put('/api/questions/1').set('Origin', 'http://localhost:5173').set('Cookie', cookie()).send({ referenceAnswer: 'Bypass' });

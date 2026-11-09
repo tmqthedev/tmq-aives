@@ -34,6 +34,12 @@ function createRevisionContext() {
       state.revision.status = 'PUBLISHED'; state.revision.reviewed_by = actor;
       return structuredClone(state.revision);
     },
+    async markRevisionDiscarded(_id, actor, client) {
+      assert.equal(client, tx);
+      if (state.revision?.status !== 'PENDING_REVIEW') return null;
+      state.revision.status = 'DISCARDED'; state.revision.reviewed_by = actor;
+      return structuredClone(state.revision);
+    },
   };
   const service = new QuestionService({ repository,
     db: { async withTransaction(fn) { const old = structuredClone(state); try { return await fn(tx); } catch (e) { state = old; throw e; } } },

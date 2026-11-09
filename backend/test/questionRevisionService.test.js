@@ -74,9 +74,11 @@ test('repository revision writes use supplied transaction and optimistic version
   const missing = await repo.savePendingRevision(1, { content: {}, actorId: 7,
     revision: { question_revision_id: 3, version: 4 } }, client);
   await repo.markRevisionPublished(3, 7, client);
+  await repo.markRevisionDiscarded(3, 7, client);
   assert.match(calls[0].sql, /FOR UPDATE/);
   assert.match(calls[3].sql, /version = \$4/);
   assert.deepEqual(calls[3].params.slice(1), [7, 3, 4]);
+  assert.match(calls[5].sql, /status = 'DISCARDED'/);
   assert.equal(missing, null);
 });
 
@@ -88,4 +90,37 @@ test('revision identity prevents an old review request from publishing a later d
   await assert.rejects(service.publishRevision(1, { expectedVersion: 1, revisionId: 1 }, lecturer), { code: 'REVISION_CONFLICT' });
   await assert.rejects(service.saveRevision(1, { patch: { referenceAnswer: 'Stale' }, expectedVersion: 1, revisionId: 1 }, lecturer), { code: 'REVISION_CONFLICT' });
   assert.equal(state().active.reference_answer, 'Original answer');
+});
+
+test('discard marks the pending revision DISCARDED and keeps the approved question intact', async () => {
+  const { service, state } = context();
+  const before = structuredClone(state().active);
+  await service.saveRevision(1, { patch: { referenceAnswer: 'Draft' }, expectedVersion: 0 }, lecturer);
+  const result = await service.discardRevision(1, { expectedVersion: 1, revisionId: 1 }, lecturer);
+  assert.equal(result.revision.status, 'DISCARDED');
+  assert.equal(state().revision.status, 'DISCARDED');
+  assert.equal(state().revision.reviewed_by, 7);
+  assert.deepEqual(state().active, before);
+  assert.equal(await service.getPendingRevision(1, lecturer), null);
+  await assert.rejects(service.publishRevision(1, { expectedVersion: 1, revisionId: 1 }, lecturer), { code: 'REVISION_CONFLICT' });
+});
+
+test('discard rejects stale identity/version and a missing pending revision', async () => {
+  const { service, state } = context();
+  await assert.rejects(service.discardRevision(1, { expectedVersion: 1, revisionId: 1 }, lecturer), { code: 'REVISION_CONFLICT' });
+  await service.saveRevision(1, { patch: { referenceAnswer: 'Draft' }, expectedVersion: 0 }, lecturer);
+  await assert.rejects(service.discardRevision(1, { expectedVersion: 2, revisionId: 1 }, lecturer), { code: 'REVISION_CONFLICT' });
+  await assert.rejects(service.discardRevision(1, { expectedVersion: 1, revisionId: 2 }, lecturer), { code: 'REVISION_CONFLICT' });
+  await assert.rejects(service.discardRevision(1, { expectedVersion: 0, revisionId: 1 }, lecturer), { code: 'VALIDATION_ERROR' });
+  assert.equal(state().revision.status, 'PENDING_REVIEW');
+  assert.equal(state().active.reference_answer, 'Original answer');
+});
+
+test('discard enforces lecturer role and subject scope', async () => {
+  const { service, state } = context();
+  await service.saveRevision(1, { patch: { referenceAnswer: 'Draft' }, expectedVersion: 0 }, lecturer);
+  for (const user of [{ id: 7, role: 'STUDENT' }, { id: 8, role: 'LECTURER' }]) {
+    await assert.rejects(service.discardRevision(1, { expectedVersion: 1, revisionId: 1 }, user), { statusCode: 403 });
+  }
+  assert.equal(state().revision.status, 'PENDING_REVIEW');
 });

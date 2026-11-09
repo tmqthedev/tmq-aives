@@ -98,3 +98,7 @@ export function saveQuestionRevision(id, body) {
 export function publishQuestionRevision(id, body) {
   return apiRequest(`/questions/${id}/revision/publish`, { method: 'POST', body });
 }
+
+export function discardQuestionRevision(id, body) {
+  return apiRequest(`/questions/${id}/revision/discard`, { method: 'POST', body });
+}

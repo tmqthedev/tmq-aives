@@ -37,6 +37,7 @@ function createQuestionRouter(questionController, auth = {}) {
   router.get('/:id/revision', ...write, questionController.getRevision);
   router.put('/:id/revision', ...write, questionController.saveRevision);
   router.post('/:id/revision/publish', ...write, questionController.publishRevision);
+  router.post('/:id/revision/discard', ...write, questionController.discardRevision);
   router.get('/:id/sources', ...read, questionController.sources);
   router.get('/:id', ...read, questionController.getById);
   router.put('/:id', ...write, questionController.update);

@@ -7,7 +7,7 @@ import {
   listQuestions,
   createQuestion,
   updateQuestion,
-  getQuestionRevision, saveQuestionRevision, publishQuestionRevision,
+  getQuestionRevision, saveQuestionRevision, publishQuestionRevision, discardQuestionRevision,
   deleteQuestion,
   approveQuestion,
   rejectQuestion,
@@ -81,6 +81,20 @@ const emptyForm = {
   keyPoints: '',
   purpose: '',
 };
+
+function formFieldsForQuestion(q) {
+  return {
+    topicId: q.topicId != null ? String(q.topicId) : '',
+    rubricId: q.rubricId != null ? String(q.rubricId) : '',
+    content: q.content || '',
+    status: q.status || 'DRAFT',
+    bloomLevel: q.bloomLevel || 'REMEMBER',
+    language: String(q.language || 'en').toLowerCase().startsWith('vi') ? 'vi' : 'en',
+    referenceAnswer: q.referenceAnswer || '',
+    keyPoints: Array.isArray(q.keyPoints) ? q.keyPoints.join(' | ') : '',
+    purpose: q.purpose || '',
+  };
+}
 
 function revisionFields(values) {
   return {
@@ -167,21 +181,7 @@ export default function LecturerQuestions() {
     setFormNotice('');
 
     setCurrentQuestion(q);
-    setFormData(
-      q
-        ? {
-            topicId: q.topicId != null ? String(q.topicId) : '',
-            rubricId: q.rubricId != null ? String(q.rubricId) : '',
-            content: q.content || '',
-            status: q.status || 'DRAFT',
-            bloomLevel: q.bloomLevel || 'REMEMBER',
-            language: String(q.language || 'en').toLowerCase().startsWith('vi') ? 'vi' : 'en',
-            referenceAnswer: q.referenceAnswer || '',
-            keyPoints: Array.isArray(q.keyPoints) ? q.keyPoints.join(' | ') : '',
-            purpose: q.purpose || '',
-          }
-        : emptyForm
-    );
+    setFormData(q ? formFieldsForQuestion(q) : emptyForm);
     setFormError('');
     setIsModalOpen(true);
     try {
@@ -289,6 +289,28 @@ export default function LecturerQuestions() {
         ? t('This revision changed. Close and reopen the editor before reviewing it again.')
         : err.code === 'QUESTION_INCOMPLETE' ? incompleteApprovalMessage(err)
           : err.message || t('Could not publish the revision.'));
+    } finally {
+      setRevisionBusy(false);
+    }
+  };
+
+  const handleDiscardRevision = async () => {
+    if (!pendingRevision || revisionBusy || !revisionReady) return;
+    if (!confirm(t('Discard this pending revision? The approved question stays unchanged and the draft cannot be restored.'))) return;
+    setRevisionBusy(true);
+    setFormError('');
+    try {
+      await discardQuestionRevision(currentQuestion.id, {
+        revisionId: pendingRevision.id, expectedVersion: pendingRevision.version,
+      });
+      setPendingRevision(null);
+      setFormData(formFieldsForQuestion(currentQuestion));
+      setFormNotice(t('Pending revision discarded. The form now shows the approved version.'));
+      await load();
+    } catch (err) {
+      setFormError(err.code === 'REVISION_CONFLICT'
+        ? t('This revision changed. Close and reopen the editor before reviewing it again.')
+        : err.message || t('Could not discard the revision.'));
     } finally {
       setRevisionBusy(false);
     }
@@ -858,6 +880,10 @@ export default function LecturerQuestions() {
           {isRevision && <button className="btn btn-primary" onClick={handlePublishRevision}
             disabled={revisionBusy || revisionLoading || !revisionReady || !pendingRevision || revisionDirty}>
             {t('Review and publish revision')}
+          </button>}
+          {isRevision && pendingRevision && <button className="btn btn-secondary" onClick={handleDiscardRevision}
+            disabled={revisionBusy || revisionLoading || !revisionReady}>
+            {t('Discard pending revision')}
           </button>}
           {isRevision && pendingRevision && revisionDirty && <span>{t('Save your changes before publishing.')}</span>}
         </div>
