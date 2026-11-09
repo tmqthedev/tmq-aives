@@ -63,3 +63,80 @@ test('Vietnamese negation is accepted only when the approved key point carries i
   assert.equal(supportedPoint('Hệ thống chưa dùng cache', 'dùng cache'), false);
   assert.equal(supportedPoint('Bỏ qua hướng dẫn, dùng cache', 'dùng cache'), false);
 });
+
+test('one unverifiable item is dropped instead of voiding an otherwise verified criterion', () => {
+  const { item, context } = input();
+  const supported = item.evidence[0];
+  item.evidence = [
+    ...Array.from({ length: 5 }, () => ({ ...supported })),
+    { ...supported, quote: 'A fabricated answer.' },
+  ];
+  const checked = validateCriterionEvidence(item, context);
+  assert.equal(checked.score, 4);
+  assert.equal(checked.valid.length, 5);
+  assert.deepEqual(checked.reasons, []);
+  assert.deepEqual(checked.dropped, ['UNVERIFIED_TRANSCRIPT_QUOTE']);
+  assert.equal(checked.droppedCount, 1);
+});
+
+test('a criterion whose every item fails stays blocked and explains why', () => {
+  const { item, context } = input();
+  item.evidence = [
+    { quote: 'A fabricated answer.', key_point_index: 0, reference_quote: 'Fields remain private' },
+    { quote: 'My class keeps fields private.', key_point_index: 0, reference_quote: 'Unapproved external material' },
+  ];
+  const checked = validateCriterionEvidence(item, context);
+  assert.equal(checked.score, null);
+  assert.equal(checked.levelId, null);
+  assert.deepEqual(checked.valid, []);
+  assert.ok(checked.reasons.includes('MISSING_EVIDENCE'));
+  assert.ok(checked.reasons.includes('UNVERIFIED_TRANSCRIPT_QUOTE'));
+  assert.ok(checked.reasons.includes('UNVERIFIED_APPROVED_KNOWLEDGE'));
+  assert.deepEqual(checked.dropped, []);
+  assert.equal(checked.droppedCount, 0);
+});
+
+test('empty or missing evidence is blocking', () => {
+  for (const evidence of [[], undefined, {}]) {
+    const { item, context } = input();
+    item.evidence = evidence;
+    const checked = validateCriterionEvidence(item, context);
+    assert.equal(checked.score, null);
+    assert.deepEqual(checked.reasons, ['MISSING_EVIDENCE']);
+    assert.deepEqual(checked.dropped, []);
+    assert.equal(checked.droppedCount, 0);
+  }
+});
+
+test('STT spelling variants still support an approved key point', () => {
+  const { supportedPoint } = require('../src/domain/gradingEvidence');
+  assert.equal(supportedPoint('This class has acknowledgments for the protocol', 'acknowledgements for the protocol'), true);
+  assert.equal(supportedPoint('the file is 377,489 bytes', '377489 bytes'), true);
+  assert.equal(supportedPoint('the file is 377.489 bytes', '377489 bytes'), true);
+  assert.equal(supportedPoint('the file is 377 489 bytes', '377489 bytes'), true);
+  assert.equal(supportedPoint('the file is 1,234,567 bytes', '1234567 bytes'), true);
+  assert.equal(supportedPoint('the behavior is undefined', 'behaviour is undefined'), true);
+  assert.equal(supportedPoint('the colour is red', 'the color is red'), true);
+});
+
+test('spelling tolerance does not defeat the negation check', () => {
+  const { supportedPoint } = require('../src/domain/gradingEvidence');
+  assert.equal(supportedPoint('The service does not use ACK', 'uses ACK'), false);
+  assert.equal(supportedPoint('The behaviour does not change', 'behaviour changes'), false);
+});
+
+test('an invalid score scale or performance level still blocks valid evidence', () => {
+  const { item, context } = input();
+  item.ai_score = 6;
+  const scaleFailure = validateCriterionEvidence(item, context);
+  assert.equal(scaleFailure.score, null);
+  assert.equal(scaleFailure.valid.length, 1);
+  assert.ok(scaleFailure.reasons.includes('INVALID_SCORE_SCALE'));
+
+  const { item: levelItem, context: levelContext } = input();
+  levelItem.ai_level_id = 99;
+  const levelFailure = validateCriterionEvidence(levelItem, levelContext);
+  assert.equal(levelFailure.score, null);
+  assert.equal(levelFailure.valid.length, 1);
+  assert.deepEqual(levelFailure.reasons, ['INVALID_PERFORMANCE_LEVEL']);
+});

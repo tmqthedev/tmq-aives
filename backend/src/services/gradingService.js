@@ -278,12 +278,20 @@ class GradingService {
           seen.add(criterionId);
           const checked = validateCriterionEvidence(item, { knowledge, history, criterion });
           issues.push(...checked.reasons.map(reason => `${criterionId}:${reason}`));
+          const supportedIndices = [...new Set(checked.valid.map(e => e.key_point_index))].join(', ');
+          let justification = 'Evidence or score could not be verified; lecturer review required';
+          if (!checked.reasons.length) {
+            justification = `Transcript evidence supports approved key point indices: ${supportedIndices}`;
+            // Unverifiable items are dropped rather than voiding the score, but
+            // say so explicitly so a lecturer can see what was ignored.
+            if (checked.droppedCount > 0) {
+              justification += `; ${checked.droppedCount} unverifiable evidence item(s) ignored (${checked.dropped.join(', ')})`;
+            }
+          }
           return [{ criterion_id: criterionId, ai_level_id: checked.levelId,
             ai_score: checked.score, evidence: checked.valid,
             // Do not persist free-form model claims as verified conclusions.
-            ai_justification: checked.reasons.length
-              ? 'Evidence or score could not be verified; lecturer review required'
-              : `Transcript evidence supports approved key point indices: ${[...new Set(checked.valid.map(e => e.key_point_index))].join(', ')}`,
+            ai_justification: justification,
           }];
         });
         const missing = missingCriterionIds({ criteria_evaluations: safeEvaluations }, criteria);
