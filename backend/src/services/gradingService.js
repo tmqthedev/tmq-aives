@@ -281,7 +281,9 @@ class GradingService {
           const supportedIndices = [...new Set(checked.valid.map(e => e.key_point_index))].join(', ');
           let justification = 'Evidence or score could not be verified; lecturer review required';
           if (!checked.reasons.length) {
-            justification = `Transcript evidence supports approved key point indices: ${supportedIndices}`;
+            justification = checked.derived
+              ? `Server-matched transcript evidence supports approved key point indices: ${supportedIndices} (model returned no verifiable evidence)`
+              : `Transcript evidence supports approved key point indices: ${supportedIndices}`;
             // Unverifiable items are dropped rather than voiding the score, but
             // say so explicitly so a lecturer can see what was ignored.
             if (checked.droppedCount > 0) {

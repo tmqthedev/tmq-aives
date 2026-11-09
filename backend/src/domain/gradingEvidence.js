@@ -53,6 +53,68 @@ function supportedPoint(quote, point) {
   return words.length > 0 && words.every(word => transcriptWords.has(word));
 }
 
+function transcriptTokens(text) {
+  const tokens = [];
+  const matcher = /[\p{L}\p{N}]+/gu;
+  for (const match of String(text ?? '').matchAll(matcher)) {
+    tokens.push({ raw: match[0], start: match.index, end: match.index + match[0].length });
+  }
+  // Keep the original offsets while applying the same grouped-number folding
+  // used by supportedPoint (e.g. 1,234,567 becomes one comparable token).
+  for (let i = 0; i < tokens.length; i += 1) {
+    if (!/^\d+$/u.test(tokens[i].raw)) continue;
+    let combined = tokens[i].raw;
+    let last = i;
+    while (last + 1 < tokens.length && /^\d+$/u.test(tokens[last + 1].raw)
+      && /^\d{3}$/u.test(tokens[last + 1].raw)
+      && /^[,.\s]+$/u.test(String(text).slice(tokens[last].end, tokens[last + 1].start))) {
+      combined += tokens[last + 1].raw;
+      last += 1;
+    }
+    if (last > i) {
+      tokens.splice(i, last - i + 1, { raw: combined, start: tokens[i].start, end: tokens[last].end });
+    }
+  }
+  return tokens.map(token => ({ ...token, folded: canonicalWord(token.raw.toLowerCase()) }));
+}
+
+function deriveTranscriptEvidence({ knowledge, history }) {
+  const reference = exactForm(knowledge?.reference_answer);
+  const results = [];
+  for (let pointIndex = 0; pointIndex < (knowledge?.key_points || []).length; pointIndex += 1) {
+    const point = knowledge.key_points[pointIndex];
+    if (!nonblank(point) || !exactForm(reference).includes(exactForm(point))) continue;
+    const pointWords = canonicalWords(point).filter(word => !ignoredWords.has(word));
+    const required = new Set(pointWords);
+    if (!required.size) continue;
+    const maxWindow = 2 * canonicalWords(point).length + 2;
+    let found = null;
+    for (const turn of history || []) {
+      const answer = String(turn.answerText ?? '');
+      const tokens = transcriptTokens(answer);
+      for (let start = 0; start < tokens.length; start += 1) {
+        const seen = new Set();
+        for (let end = start; end < tokens.length && end - start + 1 <= maxWindow; end += 1) {
+          seen.add(tokens[end].folded);
+          if (pointWords.every(word => seen.has(word))) {
+            const preceding = start > 0 ? tokens[start - 1] : null;
+            const includeNegation = preceding && negations.includes(preceding.folded);
+            const quote = answer.slice(includeNegation ? preceding.start : tokens[start].start, tokens[end].end);
+            if (supportedPoint(quote, point)) {
+              const candidate = { quote, length: end - start + 1 };
+              if (!found || candidate.length < found.length) found = candidate;
+            }
+            break;
+          }
+        }
+      }
+    }
+    if (found) results.push({ quote: found.quote, key_point_index: pointIndex, key_point: point,
+      reference_quote: point, source: 'SERVER_MATCH' });
+  }
+  return results;
+}
+
 function validateCriterionEvidence(item, { knowledge, history, criterion }) {
   const blocking = [];
   const itemFailures = [];
@@ -87,11 +149,20 @@ function validateCriterionEvidence(item, { knowledge, history, criterion }) {
   // Per-item failures only void the criterion when they leave no verified
   // evidence at all. With at least one valid item they are dropped so a single
   // spelling/STT mismatch cannot null out an otherwise supported score.
-  if (!valid.length) blocking.push(...itemFailures, 'MISSING_EVIDENCE');
+  let derived = false;
+  if (!valid.length) {
+    // Only a silent model (no evidence at all) gets the server-side match.
+    // Fabricated quotes mean the grading itself is unreliable: keep it blocked.
+    const fallback = itemFailures.length ? [] : deriveTranscriptEvidence({ knowledge, history });
+    if (fallback.length) {
+      valid.push(...fallback);
+      derived = true;
+    } else blocking.push(...itemFailures, 'MISSING_EVIDENCE');
+  }
   const reasons = [...new Set(blocking)];
-  const dropped = valid.length ? [...new Set(itemFailures)] : [];
+  const dropped = valid.length && !derived ? [...new Set(itemFailures)] : [];
   return { valid, reasons, dropped, droppedCount: valid.length ? itemFailures.length : 0,
     score: reasons.length ? null : score,
-    levelId: reasons.length || !level ? null : Number(level.performance_level_id) };
+    levelId: reasons.length || !level ? null : Number(level.performance_level_id), ...(derived ? { derived: true } : {}) };
 }
-module.exports = { validateCriterionEvidence, supportedPoint };
+module.exports = { validateCriterionEvidence, supportedPoint, deriveTranscriptEvidence, canonicalWord, canonicalWords, collapseDigitGroups };

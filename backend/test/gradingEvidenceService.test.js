@@ -140,3 +140,54 @@ test('an invalid score scale or performance level still blocks valid evidence', 
   assert.equal(levelFailure.valid.length, 1);
   assert.deepEqual(levelFailure.reasons, ['INVALID_PERFORMANCE_LEVEL']);
 });
+
+test('server derives shortest exact Vietnamese transcript evidence when the model returns none', () => {
+  const point = 'Số thứ tự giúp bên nhận sắp xếp dữ liệu và nhận biết dữ liệu bị thiếu.';
+  const answer = 'truyền lại số thứ tự giúp bên nhận sắp xếp dữ liệu và nhận biết dữ liệu bị thiếu bên nhận gửi ác';
+  const { item, context } = input();
+  item.evidence = [];
+  context.knowledge.key_points = [point];
+  context.knowledge.reference_answer = point;
+  context.history = [{ answerText: answer }];
+  const checked = validateCriterionEvidence(item, context);
+  assert.equal(checked.derived, true);
+  assert.equal(checked.score, 4);
+  assert.ok(checked.valid[0].source === 'SERVER_MATCH');
+  assert.ok(answer.includes(checked.valid[0].quote));
+});
+
+test('server evidence fallback rejects distant words, negation, and unapproved reference text', () => {
+  const point = 'sắp xếp dữ liệu';
+  const cases = [
+    { answer: 'sắp xếp alpha beta gamma delta epsilon zeta eta theta dữ liệu', reference: point },
+    { answer: 'không sắp xếp dữ liệu', reference: point },
+    { answer: 'sắp xếp dữ liệu', reference: 'Reference contains no such claim.' },
+  ];
+  for (const entry of cases) {
+    const { item, context } = input();
+    item.evidence = [];
+    context.knowledge.key_points = [point];
+    context.knowledge.reference_answer = entry.reference;
+    context.history = [{ answerText: entry.answer }];
+    const checked = validateCriterionEvidence(item, context);
+    assert.equal(checked.derived, undefined);
+    assert.equal(checked.score, null);
+    assert.ok(checked.reasons.includes('MISSING_EVIDENCE'));
+  }
+});
+
+test('valid model evidence bypasses derivation and derivation does not bypass score validation', () => {
+  const { item, context } = input();
+  item.evidence[0].reference_quote = 'Fields remain private';
+  context.knowledge.reference_answer = 'Fields remain private';
+  assert.equal(validateCriterionEvidence(item, context).derived, undefined);
+
+  item.evidence = [];
+  context.knowledge.key_points = ['Fields remain private'];
+  context.history = [{ answerText: 'Fields remain private' }];
+  item.ai_score = 6;
+  const checked = validateCriterionEvidence(item, context);
+  assert.equal(checked.derived, true);
+  assert.equal(checked.score, null);
+  assert.ok(checked.reasons.includes('INVALID_SCORE_SCALE'));
+});
