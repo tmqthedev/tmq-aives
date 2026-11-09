@@ -32,6 +32,11 @@ function createQuestionRouter(questionController, auth = {}) {
 
   router.post('/', ...write, questionController.create);
   router.get('/', ...read, questionController.list);
+  // Revision knowledge is lecturer-only, including reads. The service checks
+  // subject scope and optimistic revision identity/version on every mutation.
+  router.get('/:id/revision', ...write, questionController.getRevision);
+  router.put('/:id/revision', ...write, questionController.saveRevision);
+  router.post('/:id/revision/publish', ...write, questionController.publishRevision);
   router.get('/:id/sources', ...read, questionController.sources);
   router.get('/:id', ...read, questionController.getById);
   router.put('/:id', ...write, questionController.update);

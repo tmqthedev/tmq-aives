@@ -265,6 +265,65 @@ describeDb('interview engine e2e (requires Postgres)', () => {
     expect(count.rows[0].n).toBe(1);
   });
 
+  test('STT dispute: persisted columns, lecturer turn view and finalized guard', async () => {
+    const suffix = `${Date.now()}-d`;
+    const student = await pool.query(
+      `INSERT INTO app_user (code, email, full_name, role, status)
+       VALUES ($1, $2, 'Step6 Dispute Student', 'STUDENT', 'ACTIVE') RETURNING app_user_id`,
+      [`S6D-${suffix}`, `step6d-${suffix}@aives.local`],
+    );
+    const sid = student.rows[0].app_user_id;
+    const exam = await pool.query(
+      `INSERT INTO exam_session
+         (subject_id, topic_id, title, language, main_question_count, max_follow_ups_per_question,
+          answer_time_limit_sec, think_time_sec, status, session_time_limit_sec)
+       VALUES ($1, $2, 'Step6 dispute viva', 'EN', 1, 0, 120, 0, 'OPEN', 600)
+       RETURNING exam_session_id`,
+      [subjectId, topicId],
+    );
+    const examId = exam.rows[0].exam_session_id;
+    await pool.query(
+      'INSERT INTO exam_session_student (exam_session_id, student_id) VALUES ($1, $2)',
+      [examId, sid],
+    );
+
+    const su = { id: sid, role: 'STUDENT' };
+    let view = await service.startOrResume({ user: su, examSessionId: examId });
+    const interviewId = view.interviewId;
+    const turnId = view.currentTurn.turnId;
+    view = await service.markQuestionPlayed({ user: su, interviewId, turnId });
+    view = await service.submitAnswer({ user: su, interviewId, turnId, transcript: { text: FULL } });
+    expect(view.status).toBe('COMPLETED');
+
+    // Dispute the answered turn.
+    const out = await service.disputeStt({ user: su, interviewId, turnId, note: 'Misheard a term.' });
+    expect(out).toEqual({ turnId, sttDisputed: true, sttDisputeNote: 'Misheard a term.' });
+
+    const persisted = await pool.query(
+      'SELECT stt_disputed_at, stt_dispute_note FROM qa_turn WHERE qa_turn_id = $1',
+      [turnId],
+    );
+    expect(persisted.rows[0].stt_disputed_at).toBeTruthy();
+    expect(persisted.rows[0].stt_dispute_note).toBe('Misheard a term.');
+
+    // Grade, then check the lecturer turn view surfaces the dispute.
+    const graded = await gradingService.gradeInterview({ interviewId });
+    const detail = await vivaResultRepository.getFullResultDetail(graded.viva_result_id);
+    const disputedTurn = detail.evaluations
+      .flatMap((e) => e.turns || [])
+      .find((t) => t.qa_turn_id === turnId);
+    expect(disputedTurn).toBeTruthy();
+    expect(disputedTurn.sttDisputed).toBe(true);
+    expect(disputedTurn.sttDisputeNote).toBe('Misheard a term.');
+    expect(disputedTurn.sttDisputedAt).toBeTruthy();
+
+    // Finalized guard: no further disputes after finalization.
+    await pool.query("UPDATE viva_result SET status = 'FINALIZED' WHERE interview_id = $1", [interviewId]);
+    await expect(
+      service.disputeStt({ user: su, interviewId, turnId, note: 'again' }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'RESULT_FINALIZED' });
+  });
+
   test('Step 12: concurrent starts serialize on the exam lock -> no overlap, same Bloom mix', async () => {
     const suffix = `${Date.now()}-c`;
     const topic = await pool.query(
@@ -276,8 +335,9 @@ describeDb('interview engine e2e (requires Postgres)', () => {
     for (let i = 0; i < levels.length; i += 1) {
       // eslint-disable-next-line no-await-in-loop
       await pool.query(
-        `INSERT INTO question (topic_id, rubric_id, content, status, source, bloom_level)
-         VALUES ($1, $2, $3, 'APPROVED', 'MANUAL', $4)`,
+        `INSERT INTO question (topic_id, rubric_id, content, status, source, bloom_level,
+                               reference_answer, key_points)
+         VALUES ($1, $2, $3, 'APPROVED', 'MANUAL', $4, 'Reference answer.', '["Key point"]'::jsonb)`,
         [tId, rubricId, `Step12 Q${i} ${suffix}`, levels[i]],
       );
     }

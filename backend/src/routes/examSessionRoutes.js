@@ -18,6 +18,7 @@ function createExamSessionRouter(examSessionController, auth = {}) {
   router.get('/', ...guard, examSessionController.list);
   router.get('/options', ...guard, examSessionController.getOptions);
   router.get('/progress', ...guard, examSessionController.getProgress);
+  router.get('/monitoring', ...guard, examSessionController.getMonitoring);
   router.get('/:id', ...guard, examSessionController.getById);
   router.put('/:id', ...guard, examSessionController.update);
   router.put('/:id/students', ...guard, examSessionController.setStudents);

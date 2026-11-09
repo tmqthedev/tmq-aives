@@ -98,8 +98,8 @@ describe('AIVES System - E2E Workflows', () => {
         expect.objectContaining({
           topicId: ctx.topicId,
           rubricId: ctx.rubricId,
-          // content + topic + rubric present => defaults to APPROVED.
-          status: 'APPROVED',
+          // Never auto-approved: a lecturer must review it explicitly.
+          status: 'PENDING_REVIEW',
           content: expect.any(String),
         }),
       );

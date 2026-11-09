@@ -1,3 +1,4 @@
+const { readInterviewQuestion } = require('../interview/knowledgeSnapshot');
 // Interview engine (Step 6): runs one student's viva from start to completion.
 // ENGINE ONLY: no REST routes and no Socket.IO here; Step 7 wires these public
 // methods to the transport. Every public method returns ONLY the student-safe
@@ -27,6 +28,7 @@ const {
   buildMainRationale, buildFollowUpRationale, toStringArray, criterionNames,
 } = require('../interview/rationaleBuilder');
 const { toStudentInterviewView, assertStudentSafe } = require('../interview/studentView');
+const { toStudentTranscriptView } = require('../interview/studentTranscriptView');
 const {
   ACTIVE_INTERVIEW_STATUSES, ACTIVE_TURN_STATUSES, END_REASONS,
 } = require('../domain/interviewStatus');
@@ -113,10 +115,12 @@ class InterviewService {
     awsClients,
     enqueueJob,
     env = {},
+    realtimeBus = null,
     clock = () => new Date(),
     random = Math.random,
     logger = console,
   } = {}) {
+    this.realtimeBus = realtimeBus;
     this.db = db;
     this.examSessionRepository = examSessionRepository;
     this.vivaInterviewRepository = vivaInterviewRepository;
@@ -198,14 +202,63 @@ class InterviewService {
         // call is normally a cache hit.
         await this._lockExam(examId, tx);
         const pickedIds = await this._pickMainQuestions(exam, bank, required, tx);
+        const lockedQuestions = new Map();
+        // Global lock order avoids cross-exam starts taking the same question
+        // and rubric locks in opposite random picker order.
+        for (const qid of [...pickedIds].sort((a, b) => Number(a) - Number(b))) {
+          const question = await this.questionRepository.findByIdForUpdate(qid, tx);
+          let points = question?.key_points;
+          if (typeof points === 'string') {
+            try { points = JSON.parse(points); } catch { points = null; }
+          }
+          if (!question || question.status !== 'APPROVED'
+            || typeof question.reference_answer !== 'string' || !question.reference_answer.trim()
+            || !Array.isArray(points) || !points.some((point) => typeof point === 'string' && point.trim())
+            || question.rubric_id == null) {
+            throw httpError(409, 'QUESTION_INCOMPLETE', 'A selected approved question changed; retry after bank review.');
+          }
+          const selected = bank.find(q => Number(q.question_id) === Number(qid));
+          if (Number(question.topic_id) !== Number(exam.topic_id)
+            || examLanguageOf(question) !== String(exam.language).toUpperCase()
+            || (selected?.bloom_level ?? null) !== (question.bloom_level ?? null)) {
+            throw httpError(409, 'QUESTION_BANK_CHANGED', 'The selected bank changed; retry the interview start.');
+          }
+          lockedQuestions.set(qid, { ...question, key_points: points });
+        }
+        const rubricIds = [...new Set([...lockedQuestions.values()].map(q => Number(q.rubric_id)))].sort((a, b) => a - b);
+        for (const rubricId of rubricIds) await this.rubricRepository.setLocked(rubricId, true, tx);
         const questions = [];
         for (const qid of pickedIds) {
-          // eslint-disable-next-line no-await-in-loop
-          questions.push(await this.questionRepository.findById(qid));
+          const question = lockedQuestions.get(qid);
+          const material = await this._loadQuestionMaterial(question, tx);
+          if (!material.rubric || !Array.isArray(material.rubric.criteria) || material.rubric.criteria.length === 0) {
+            throw httpError(409, 'QUESTION_INCOMPLETE', 'A selected question has no grading rubric criteria.');
+          }
+          const rubric = material.rubric;
+          questions.push(JSON.parse(JSON.stringify({
+            snapshot_version: 1, question_id: question.question_id,
+            content_version: question.content_version, topic_id: question.topic_id,
+            content: question.content, bloom_level: question.bloom_level,
+            language: question.language, source: question.source,
+            reference_answer: question.reference_answer, key_points: question.key_points,
+            rubric_id: question.rubric_id, rationale: question.rationale,
+            rubric_snapshot: {
+              rubric_id: rubric.rubric_id, version: rubric.version, max_score: rubric.max_score,
+              criteria: rubric.criteria.map(c => ({
+                rubric_criterion_id: c.rubric_criterion_id, criterion_name: c.criterion_name,
+                weight_percent: c.weight_percent, description: c.description, order_index: c.order_index,
+                performance_levels: (c.performance_levels || []).map(l => ({
+                  performance_level_id: l.performance_level_id, label: l.label,
+                  min_score: l.min_score, max_score: l.max_score, description: l.description, order_no: l.order_no,
+                })),
+              })),
+            },
+            source_refs_snapshot: material.sourceRefs.map(ref => ({
+              chunkId: ref.chunkId, excerpt: ref.excerpt, materialTitle: ref.materialTitle,
+              location: ref.location, content: ref.content,
+            })),
+          })));
         }
-        const rubricIds = [...new Set(questions
-          .map((q) => (q && q.rubric_id != null ? Number(q.rubric_id) : null))
-          .filter((id) => id != null))];
 
         const first = await this._prepareMainTurn(questions[0], exam);
         // Final gate: slow preparation (TTS) must not create an already-expired
@@ -223,13 +276,7 @@ class InterviewService {
           clientIp: clientIp ?? null,
         }, tx);
         const interviewId = interview.viva_interview_id;
-        const assigned = await this.assignedQuestionRepository.createMany(interviewId, pickedIds, tx);
-        // Lock the rubric of every assigned question (idempotent) so it cannot
-        // change while this student is being examined on it.
-        for (const rubricId of rubricIds) {
-          // eslint-disable-next-line no-await-in-loop
-          await this.rubricRepository.setLocked(rubricId, true, tx);
-        }
+        const assigned = await this.assignedQuestionRepository.createMany(interviewId, pickedIds, tx, questions);
         const turn = await this.qaTurnRepository.create({
           interviewId,
           assignedQuestionId: assigned[0].assigned_question_id,
@@ -268,7 +315,28 @@ class InterviewService {
       coveredKeyPoints: {},
       partialSegments: [],
     }));
+    await this._publishInterview(interview, 'created', exam);
     return this._buildView(interview, exam, { currentTurn: turn, totalQuestions: assigned.length });
+  }
+
+  // Invalidation only (ids + status). Runs after commit; never throws and
+  // never carries answer text. studentUserId is routing-only (stripped on the wire).
+  async _publishInterview(interview, action, knownExam = null) {
+    if (!this.realtimeBus || !interview) return;
+    try {
+      const examId = Number(interview.exam_session_id);
+      const exam = knownExam || await this.examSessionRepository.findById(examId);
+      this.realtimeBus.publish('interview', {
+        action,
+        interviewId: Number(interview.viva_interview_id),
+        examSessionId: examId,
+        subjectId: exam?.subject_id ?? null,
+        status: interview.status,
+        studentUserId: interview.student_id == null ? null : Number(interview.student_id),
+      });
+    } catch (err) {
+      this.logger?.warn?.({ err }, 'interview realtime publish failed');
+    }
   }
 
   async getCurrentState({ user, interviewId } = {}) {
@@ -434,7 +502,7 @@ class InterviewService {
     const assignedRow = assigned.find(
       (a) => String(a.assigned_question_id) === String(claimed.assigned_question_id),
     );
-    const question = assignedRow ? await this.questionRepository.findById(assignedRow.question_id) : null;
+    const question = readInterviewQuestion(assignedRow);
     const keyPoints = toStringArray(question && question.key_points);
 
     // --- Resolve the answer text -------------------------------------------
@@ -603,6 +671,7 @@ class InterviewService {
 
     let llmDecision;
     if (receivedAt.getTime() < deadlineMs
+      && question.snapshot_version === 1
       && shouldConsultLlm({ answerText, ...caps })) {
       llmDecision = await this._decideWithRetry({
         input: {
@@ -691,7 +760,7 @@ class InterviewService {
     } else {
       const index = Number(interview.current_question_index) || 0;
       const next = assigned.find((a) => Number(a.order_no) === index + 2);
-      const nextQuestion = next ? await this.questionRepository.findById(next.question_id) : null;
+      const nextQuestion = next ? readInterviewQuestion(next) : null;
       const prepared = next ? await this._prepareMainTurn(nextQuestion, exam) : null;
       if (!next) {
         current = await this._endInterview(interview, END_REASONS.QUESTIONS_EXHAUSTED);
@@ -739,6 +808,70 @@ class InterviewService {
       await this._safeContext(() => this.sessionContextStore.update(id, { coveredKeyPoints }));
     }
     return this._buildView(current, exam, { currentTurn, totalQuestions: assigned.length });
+  }
+
+  // Student-owned question/answer history. Available during and after the
+  // interview; only answered turns plus the current asked question.
+  async getTranscript({ user, interviewId } = {}) {
+    const { interview } = await this._loadOwned(user, interviewId);
+    const turns = await this.qaTurnRepository.listByInterview(interview.viva_interview_id);
+    return assertStudentSafe(
+      toStudentTranscriptView({ interview, turns }),
+      { allowedKeys: ['transcript'] },
+    );
+  }
+
+  // The recognized answer text of one of the student's own answered turns, for
+  // the `turn:transcribed` event and the REST answer response. Returns null
+  // when the turn has not been answered yet (e.g. an empty-audio retry).
+  async getTranscribedTurn({ user, interviewId, turnId } = {}) {
+    const { interview } = await this._loadOwned(user, interviewId);
+    const id = this._parseId(turnId, 'turn id');
+    const turn = await this.qaTurnRepository.findById(id);
+    if (!turn || String(turn.interview_id) !== String(interview.viva_interview_id)) {
+      throw httpError(404, 'TURN_NOT_FOUND', 'Turn not found.');
+    }
+    if (turn.status !== 'ANSWERED') return null;
+    return {
+      interviewId: interview.viva_interview_id,
+      turnId: turn.qa_turn_id,
+      sequenceNo: turn.sequence_no,
+      transcript: turn.answer_text ?? null,
+    };
+  }
+
+  // Let a student flag a mis-recognized answer so the examiner replays the
+  // audio. Allowed during the interview and after completion until the result
+  // is FINALIZED. Idempotent: a second call updates the note.
+  async disputeStt({ user, interviewId, turnId, note = null } = {}) {
+    const { interview, exam } = await this._loadOwned(user, interviewId);
+    const id = this._parseId(turnId, 'turn id');
+    const turn = await this.qaTurnRepository.findById(id);
+    if (!turn || String(turn.interview_id) !== String(interview.viva_interview_id)) {
+      throw httpError(404, 'TURN_NOT_FOUND', 'Turn not found.');
+    }
+    if (turn.status !== 'ANSWERED') {
+      throw httpError(409, 'TURN_NOT_ANSWERED', 'Only answered turns can be disputed.');
+    }
+    const result = await this.vivaResultRepository.findByInterviewId(interview.viva_interview_id);
+    if (result && result.status === 'FINALIZED') {
+      throw httpError(409, 'RESULT_FINALIZED', 'The result is finalized; STT disputes are no longer accepted.');
+    }
+    const rawNote = note == null ? null : String(note);
+    if (rawNote != null && rawNote.length > 500) {
+      throw httpError(400, 'VALIDATION_ERROR', 'Dispute note must be at most 500 characters.');
+    }
+    const noteText = rawNote == null ? null : (rawNote.trim() || null);
+    const updated = await this.qaTurnRepository.update(turn.qa_turn_id, {
+      stt_disputed_at: this.clock(),
+      stt_dispute_note: noteText,
+    });
+    await this._publishInterview(interview, 'updated', exam);
+    return {
+      turnId: updated.qa_turn_id,
+      sttDisputed: true,
+      sttDisputeNote: updated.stt_dispute_note ?? null,
+    };
   }
 
   // =========================================================================
@@ -916,6 +1049,7 @@ class InterviewService {
       answerDeadlineAt: null,
       partialSegments: [],
     }));
+    await this._publishInterview({ ...interview, ...ended }, 'completed');
     return ended;
   }
 
@@ -958,13 +1092,20 @@ class InterviewService {
     };
   }
 
-  async _loadQuestionMaterial(question) {
+  async _loadQuestionMaterial(question, client) {
+    if (question?.snapshot_version === 1 || question?.legacy_operational_only) {
+      const sourceRefs = question.source_refs_snapshot || [];
+      return {
+        sourceRefs, rubric: question.rubric_snapshot,
+        sourceChunks: sourceRefs.map((s) => ({ chunkId: s.chunkId, location: s.location, content: s.content })),
+      };
+    }
     let sourceRefs = [];
     if (question && question.source === 'AI' && this.questionSourceRefRepository) {
-      sourceRefs = await this.questionSourceRefRepository.listByQuestionWithMaterial(question.question_id);
+      sourceRefs = await this.questionSourceRefRepository.listByQuestionWithMaterial(question.question_id, client);
     }
     const rubric = question && question.rubric_id != null && this.rubricRepository
-      ? await this.rubricRepository.findById(question.rubric_id)
+      ? await this.rubricRepository.findById(question.rubric_id, client)
       : null;
     return {
       sourceRefs,

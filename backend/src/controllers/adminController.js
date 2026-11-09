@@ -95,6 +95,12 @@ class AdminController {
     } catch (err) { next(err); }
   }
 
+  async getExamMonitoring(req, res, next) {
+    try {
+      res.json(await this._requireExamSessions().getInterviewCounts({ user: req.user }));
+    } catch (err) { next(err); }
+  }
+
   // Admin create/edit/delete (Step 14). Create and edit reuse the lecturer
   // service (ADMIN passes the subject scope; the language is derived from the
   // topic bank); a new session starts as DRAFT for the lecturers to complete.

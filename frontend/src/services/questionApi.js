@@ -85,3 +85,16 @@ export async function downloadTemplate() {
   link.remove();
   URL.revokeObjectURL(url);
 }
+
+
+export function getQuestionRevision(id) {
+  return apiRequest(`/questions/${id}/revision`);
+}
+
+export function saveQuestionRevision(id, body) {
+  return apiRequest(`/questions/${id}/revision`, { method: 'PUT', body });
+}
+
+export function publishQuestionRevision(id, body) {
+  return apiRequest(`/questions/${id}/revision/publish`, { method: 'POST', body });
+}

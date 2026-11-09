@@ -283,7 +283,20 @@ describe('AIVES - Critical CRUD E2E', () => {
   // QUESTION
   // ===========================================================================
   describe('Question CRUD', () => {
-    test('C: POST /questions -> 201 (envelope { question, warnings }), default APPROVED khi đủ topic+rubric', async () => {
+    // A question can only be approved with a reference answer, key points and a
+    // rubric. The offline mock DB does not round-trip those columns on INSERT,
+    // so they are set with a PUT (while the question is still unapproved).
+    const completeAndApprove = async (id) => {
+      const put = await lec(api().put(`/api/questions/${id}`)).send({
+        rubricId: ids.rubric,
+        referenceAnswer: 'Reference answer.',
+        keyPoints: ['Key point one'],
+      });
+      expect(put.status).toBe(200);
+      return lec(api().post(`/api/questions/${id}/approve`));
+    };
+
+    test('C: POST /questions -> 201 (envelope { question, warnings }), không tự APPROVED: PENDING_REVIEW khi đủ topic+rubric', async () => {
       const res = await lec(api().post('/api/questions')).send({
         topicId: ids.topic,
         rubricId: ids.rubric,
@@ -303,7 +316,7 @@ describe('AIVES - Critical CRUD E2E', () => {
           topicId: ids.topic,
           rubricId: ids.rubric,
           content: 'What is polymorphism?',
-          status: 'APPROVED',
+          status: 'PENDING_REVIEW',
         }),
       );
       ids.question = res.body.question.id;
@@ -352,10 +365,14 @@ describe('AIVES - Critical CRUD E2E', () => {
       expect(list.body.map((q) => q.id)).toEqual([ids.question, ids.otherQuestion]);
 
       // Lọc theo status mới.
+      const pending = await lec(api().get('/api/questions').query({ status: 'PENDING_REVIEW' }));
+      expect(pending.status).toBe(200);
+      expect(pending.body.every((q) => q.status === 'PENDING_REVIEW')).toBe(true);
+      expect(pending.body.some((q) => q.id === ids.question)).toBe(true);
+      // Nothing is auto-approved, so the APPROVED filter is empty here.
       const approved = await lec(api().get('/api/questions').query({ status: 'APPROVED' }));
       expect(approved.status).toBe(200);
-      expect(approved.body.every((q) => q.status === 'APPROVED')).toBe(true);
-      expect(approved.body.some((q) => q.id === ids.question)).toBe(true);
+      expect(approved.body).toEqual([]);
 
       // Lọc theo topicId
       const byTopic = await lec(api().get('/api/questions').query({ topicId: ids.topic }));
@@ -405,8 +422,7 @@ describe('AIVES - Critical CRUD E2E', () => {
       expect((await lec(api().get(`/api/questions/${id}`))).body.status).toBe('DRAFT');
 
       // ARCHIVED là trạng thái cuối: không thể "hồi sinh" bằng PUT.
-      await lec(api().put(`/api/questions/${id}`)).send({ rubricId: ids.rubric });
-      expect((await lec(api().post(`/api/questions/${id}/approve`))).status).toBe(200);
+      expect((await completeAndApprove(id)).status).toBe(200);
       expect((await lec(api().post(`/api/questions/${id}/archive`))).status).toBe(200);
       expect((await lec(api().put(`/api/questions/${id}`)).send({ status: 'DRAFT' })).status).toBe(409);
       expect((await lec(api().put(`/api/questions/${id}`)).send({ status: 'APPROVED' })).status).toBe(400);
@@ -415,10 +431,12 @@ describe('AIVES - Critical CRUD E2E', () => {
       const keep = await lec(api().post('/api/questions')).send({
         topicId: ids.topic, rubricId: ids.rubric, content: 'H1 keeps rubric', language: 'en',
       });
-      expect(keep.body.question.status).toBe('APPROVED');
+      expect(keep.body.question.status).toBe('PENDING_REVIEW');
+      expect((await completeAndApprove(keep.body.question.id)).status).toBe(200);
       const strip = await lec(api().put(`/api/questions/${keep.body.question.id}`)).send({ rubricId: null });
       expect(strip.status).toBe(409);
-      expect(strip.body.code).toBe('RUBRIC_REQUIRED');
+      // Approved content (including its rubric) is protected: changing it needs a revision.
+      expect(strip.body.code).toBe('QUESTION_REVISION_REQUIRED');
 
       await lec(api().delete(`/api/questions/${id}`));
       await lec(api().delete(`/api/questions/${keep.body.question.id}`));
@@ -457,9 +475,14 @@ describe('AIVES - Critical CRUD E2E', () => {
       expect(approveNoRubric.status).toBe(409);
       expect(approveNoRubric.body.code).toBe('RUBRIC_REQUIRED');
 
-      // Gắn rubric rồi approve -> APPROVED
+      // Có rubric nhưng thiếu đáp án tham chiếu/key points -> 409 QUESTION_INCOMPLETE
       await lec(api().put(`/api/questions/${draftId}`)).send({ rubricId: ids.rubric });
-      const approved = await lec(api().post(`/api/questions/${draftId}/approve`));
+      const approveIncomplete = await lec(api().post(`/api/questions/${draftId}/approve`));
+      expect(approveIncomplete.status).toBe(409);
+      expect(approveIncomplete.body.code).toBe('QUESTION_INCOMPLETE');
+
+      // Đủ rubric + đáp án + key points rồi approve -> APPROVED
+      const approved = await completeAndApprove(draftId);
       expect(approved.status).toBe(200);
       expect(approved.body.status).toBe('APPROVED');
 
@@ -468,19 +491,29 @@ describe('AIVES - Critical CRUD E2E', () => {
       expect(badReject.status).toBe(409);
       expect(badReject.body.code).toBe('INVALID_TRANSITION');
 
-      // Chuyển sang PENDING_REVIEW để test reject thiếu reason.
-      await lec(api().put(`/api/questions/${draftId}`)).send({ status: 'PENDING_REVIEW' });
-      const rejectNoReason = await lec(api().post(`/api/questions/${draftId}/reject`)).send({});
+      // Approved content is protected: editing it needs a revision.
+      const editApproved = await lec(api().put(`/api/questions/${draftId}`)).send({ content: 'Changed' });
+      expect(editApproved.status).toBe(409);
+      expect(editApproved.body.code).toBe('QUESTION_REVISION_REQUIRED');
+
+      // Câu PENDING_REVIEW riêng để test reject thiếu reason.
+      const pendingRes = await lec(api().post('/api/questions')).send({
+        topicId: ids.topic, rubricId: ids.rubric, content: 'Lifecycle pending question', language: 'en',
+      });
+      expect(pendingRes.body.question.status).toBe('PENDING_REVIEW');
+      const pendingId = pendingRes.body.question.id;
+      const rejectNoReason = await lec(api().post(`/api/questions/${pendingId}/reject`)).send({});
       expect(rejectNoReason.status).toBe(400);
       expect(rejectNoReason.body.code).toBe('REASON_REQUIRED');
 
-      const rejected = await lec(api().post(`/api/questions/${draftId}/reject`)).send({ reason: 'Too broad' });
+      const rejected = await lec(api().post(`/api/questions/${pendingId}/reject`)).send({ reason: 'Too broad' });
       expect(rejected.status).toBe(200);
       expect(rejected.body.status).toBe('REJECTED');
       expect(rejected.body.reviewNote).toBe('Too broad');
 
       // Dọn dẹp câu lifecycle để không ảnh hưởng assert đếm phía sau.
       expect((await lec(api().delete(`/api/questions/${draftId}`))).status).toBe(200);
+      expect((await lec(api().delete(`/api/questions/${pendingId}`))).status).toBe(200);
     });
   });
 

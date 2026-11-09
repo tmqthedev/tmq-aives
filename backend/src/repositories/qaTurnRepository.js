@@ -129,6 +129,8 @@ QaTurnRepository.UPDATABLE_COLUMNS = [
   'played_at',
   'answer_deadline_at',
   'retry_count',
+  'stt_disputed_at',
+  'stt_dispute_note',
 ];
 
 module.exports = { QaTurnRepository };

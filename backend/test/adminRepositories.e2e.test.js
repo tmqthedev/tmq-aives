@@ -123,14 +123,29 @@ describeDb('admin repositories (requires Postgres)', () => {
     });
     await client.query('INSERT INTO subject_lecturer (subject_id, lecturer_id) VALUES ($1, $2)', [sub.subject_id, lec.app_user_id]);
     const topic = await client.query('INSERT INTO topic (name, subject_id) VALUES ($1, $2) RETURNING topic_id', [`PT ${suffix}`, sub.subject_id]);
+    // An approved question only counts when it is complete (rubric, reference answer, key points).
+    const rubric = await client.query(
+      'INSERT INTO rubric (max_score, subject_id) VALUES (10, $1) RETURNING rubric_id',
+      [sub.subject_id],
+    );
     await client.query(
-      "INSERT INTO question (topic_id, content, status, source, language) VALUES ($1, $2, 'APPROVED', 'MANUAL', 'en'), ($1, $3, 'PENDING_REVIEW', 'AI', 'en')",
-      [topic.rows[0].topic_id, `Approved ${suffix}`, `Pending ${suffix}`],
+      `INSERT INTO question (topic_id, rubric_id, content, status, source, language, reference_answer, key_points)
+       VALUES ($1, $3, $2, 'APPROVED', 'MANUAL', 'en', 'Reference answer.', '["Key point"]'::jsonb)`,
+      [topic.rows[0].topic_id, `Approved ${suffix}`, rubric.rows[0].rubric_id],
+    );
+    await client.query(
+      "INSERT INTO question (topic_id, content, status, source, language) VALUES ($1, $2, 'PENDING_REVIEW', 'AI', 'en')",
+      [topic.rows[0].topic_id, `Pending ${suffix}`],
+    );
+    // An approved but incomplete (legacy) question must not be counted.
+    await client.query(
+      "INSERT INTO question (topic_id, content, status, source, language) VALUES ($1, $2, 'APPROVED', 'MANUAL', 'en')",
+      [topic.rows[0].topic_id, `Incomplete ${suffix}`],
     );
     const rows = await exams.getLecturerProgress(lec.app_user_id);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
-      subject_id: sub.subject_id, topics: 1, ready_materials: 0, rubrics: 0,
+      subject_id: sub.subject_id, topics: 1, ready_materials: 0, rubrics: 1,
       approved_questions: 1, pending_questions: 1, scheduled_exams: 0, results_to_review: 0,
     });
     await subjects.setStatus(sub.subject_id, 'ARCHIVED');

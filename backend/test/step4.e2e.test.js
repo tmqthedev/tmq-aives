@@ -393,8 +393,9 @@ describeDb('step4 full-flow e2e (requires Postgres)', () => {
     // To make the rollback observable, add a fresh PENDING_REVIEW question and
     // pair it with an already-APPROVED one.
     const fresh = await pool.query(
-      `INSERT INTO question (topic_id, content, status, source)
-       VALUES ($1, $2, 'PENDING_REVIEW', 'AI') RETURNING question_id`,
+      `INSERT INTO question (topic_id, content, status, source, reference_answer, key_points)
+       VALUES ($1, $2, 'PENDING_REVIEW', 'AI', 'Reference answer.', '["Key point"]'::jsonb)
+       RETURNING question_id`,
       [topicId, `rollback-probe ${Date.now()}`],
     );
     const freshId = fresh.rows[0].question_id;

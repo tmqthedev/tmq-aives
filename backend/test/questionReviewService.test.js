@@ -101,8 +101,14 @@ function createService({ rubrics, topics, sourceRefs } = {}) {
 
 test('approveBatch flips every PENDING_REVIEW question to APPROVED with the shared rubric', async () => {
   const { service, repository } = createService();
-  repository.seed({ question_id: 1, topic_id: 1, status: 'PENDING_REVIEW' });
-  repository.seed({ question_id: 2, topic_id: 1, status: 'PENDING_REVIEW' });
+  repository.seed({
+    question_id: 1, topic_id: 1, status: 'PENDING_REVIEW',
+    reference_answer: 'Answer one.', key_points: ['key point one'],
+  });
+  repository.seed({
+    question_id: 2, topic_id: 1, status: 'PENDING_REVIEW',
+    reference_answer: 'Answer two.', key_points: ['key point two'],
+  });
 
   const result = await service.approveBatch({ questionIds: [1, 2], rubricId: 5, reviewedBy: 42 });
 
@@ -115,9 +121,66 @@ test('approveBatch flips every PENDING_REVIEW question to APPROVED with the shar
   assert.equal((await repository.findById(2)).status, 'APPROVED');
 });
 
+test('approveBatch rejects a blank reference answer (QUESTION_INCOMPLETE) and rolls the whole batch back', async () => {
+  const { service, repository } = createService();
+  repository.seed({
+    question_id: 1, topic_id: 1, status: 'PENDING_REVIEW',
+    reference_answer: 'Answer one.', key_points: ['key point one'],
+  });
+  repository.seed({
+    question_id: 2, topic_id: 1, status: 'PENDING_REVIEW',
+    reference_answer: '   ', key_points: ['key point two'],
+  });
+
+  await assert.rejects(
+    () => service.approveBatch({ questionIds: [1, 2], rubricId: 5, reviewedBy: 42 }),
+    (error) => {
+      assert.equal(error.statusCode, 409);
+      assert.equal(error.code, 'QUESTION_INCOMPLETE');
+      assert.equal(error.questionId, 2);
+      return true;
+    },
+  );
+
+  // Up-front validation runs BEFORE any write, so the valid row is untouched.
+  assert.equal((await repository.findById(1)).status, 'PENDING_REVIEW');
+  assert.equal((await repository.findById(2)).status, 'PENDING_REVIEW');
+});
+
+test('approveBatch rejects missing or empty key points (QUESTION_INCOMPLETE)', async () => {
+  const { service, repository } = createService();
+  repository.seed({
+    question_id: 1, topic_id: 1, status: 'PENDING_REVIEW',
+    reference_answer: 'Answer one.', key_points: [],
+  });
+
+  await assert.rejects(
+    () => service.approveBatch({ questionIds: [1], rubricId: 5 }),
+    (error) => {
+      assert.equal(error.statusCode, 409);
+      assert.equal(error.code, 'QUESTION_INCOMPLETE');
+      assert.equal(error.questionId, 1);
+      return true;
+    },
+  );
+
+  // A row with no key_points at all is also incomplete.
+  repository.seed({
+    question_id: 2, topic_id: 1, status: 'PENDING_REVIEW',
+    reference_answer: 'Answer two.',
+  });
+  await assert.rejects(
+    () => service.approveBatch({ questionIds: [2], rubricId: 5 }),
+    (error) => error.statusCode === 409 && error.code === 'QUESTION_INCOMPLETE',
+  );
+});
+
 test('approveBatch is all-or-nothing: a non-PENDING_REVIEW id rolls the whole batch back', async () => {
   const { service, repository } = createService();
-  repository.seed({ question_id: 1, topic_id: 1, status: 'PENDING_REVIEW' });
+  repository.seed({
+    question_id: 1, topic_id: 1, status: 'PENDING_REVIEW',
+    reference_answer: 'Answer one.', key_points: ['key point one'],
+  });
   repository.seed({ question_id: 2, topic_id: 1, status: 'APPROVED' }); // illegal -> rollback
 
   await assert.rejects(
@@ -211,4 +274,19 @@ test('getQuestionSources 404s for a missing question', async () => {
       return true;
     },
   );
+});
+
+
+test('approveBatch rejects non-string legacy key points before approving any row', async () => {
+  const { service, repository } = createService();
+  repository.seed({ question_id: 1, topic_id: 1, status: 'PENDING_REVIEW',
+    reference_answer: 'Good answer', key_points: ['Good point'] });
+  repository.seed({ question_id: 2, topic_id: 1, status: 'PENDING_REVIEW',
+    reference_answer: 'Malformed knowledge', key_points: [42, { x: 1 }, '  '] });
+  await assert.rejects(
+    () => service.approveBatch({ questionIds: [1, 2], rubricId: 5, reviewedBy: 7 }),
+    (e) => e.statusCode === 409 && e.code === 'QUESTION_INCOMPLETE' && /keyPoints/.test(e.message),
+  );
+  assert.equal((await repository.findById(1)).status, 'PENDING_REVIEW');
+  assert.equal((await repository.findById(2)).status, 'PENDING_REVIEW');
 });

@@ -194,8 +194,11 @@ class MockLlmAdapter {
         score = Math.round((minS + (maxS - minS) * 0.8) * 10) / 10;
       }
 
-      const quote = firstWords(fullAnswerText, 15);
-      const evidence = quote ? [{ quote }] : [];
+      const reference = mainQuestion.reference_answer || mainQuestion.referenceAnswer || '';
+      const evidence = covered.flatMap(point => {
+        const turn = history.find(h => normalizeForMatch(h.answerText || h.answer_text || '').includes(normalizeForMatch(point)));
+        return turn ? [{ quote: String(turn.answerText || turn.answer_text), key_point_index: keyPoints.indexOf(point), reference_quote: reference }] : [];
+      });
 
       return {
         criterion_id: cid,

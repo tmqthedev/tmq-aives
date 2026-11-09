@@ -212,3 +212,73 @@ test('Socket.IO connects and handles interview lifecycle events', async () => {
   client.disconnect();
   await new Promise((resolve) => server.close(resolve));
 });
+
+function connect(client) {
+  return new Promise((resolve, reject) => {
+    client.on('connect', resolve);
+    client.on('connect_error', reject);
+    client.connect();
+  });
+}
+
+test('answer:end emits turn:transcribed to the answering student only', async () => {
+  const fakeState = {
+    interviewId: 200,
+    status: 'IN_PROGRESS',
+    currentTurn: { turnId: 601, turnType: 'MAIN', questionText: 'What is a promise?' },
+  };
+  const answeredState = {
+    ...fakeState,
+    currentTurn: { turnId: 602, turnType: 'FOLLOW_UP', questionText: 'Give an example.' },
+  };
+  const transcribedPayload = { interviewId: 200, turnId: 601, sequenceNo: 1, transcript: 'Synthetic answer' };
+
+  const fakeInterviewService = {
+    async getCurrentState() { return fakeState; },
+    async submitAnswer() { return answeredState; },
+    async getTranscribedTurn({ user, interviewId, turnId }) {
+      assert.equal(user.id, 10);
+      assert.equal(interviewId, 200);
+      assert.equal(turnId, 601);
+      return transcribedPayload;
+    },
+  };
+
+  const server = http.createServer();
+  attachInterviewSocket(server, { interviewService: fakeInterviewService, tokenService });
+
+  await new Promise((resolve) => { server.listen(0, resolve); });
+  const port = server.address().port;
+
+  const owner = Client(`http://localhost:${port}/interview`, {
+    transports: ['websocket'],
+    autoConnect: false,
+    extraHeaders: { cookie: mintCookie('STUDENT', 10) },
+  });
+  const other = Client(`http://localhost:${port}/interview`, {
+    transports: ['websocket'],
+    autoConnect: false,
+    extraHeaders: { cookie: mintCookie('STUDENT', 20) },
+  });
+
+  await Promise.all([connect(owner), connect(other)]);
+
+  const ownerEvents = [];
+  const otherEvents = [];
+  owner.on('turn:transcribed', (payload) => ownerEvents.push(payload));
+  other.on('turn:transcribed', (payload) => otherEvents.push(payload));
+
+  await new Promise((resolve) => {
+    owner.emit('answer:end', { interviewId: 200, turnId: 601, contentType: 'audio/webm' }, resolve);
+  });
+
+  // Give the other student's socket a moment in case of a (buggy) broadcast.
+  await new Promise((resolve) => setTimeout(resolve, 60));
+
+  assert.deepEqual(ownerEvents, [transcribedPayload]);
+  assert.deepEqual(otherEvents, []);
+
+  owner.disconnect();
+  other.disconnect();
+  await new Promise((resolve) => server.close(resolve));
+});

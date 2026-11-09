@@ -201,8 +201,10 @@ describeDb('exam-sessions API e2e (requires Postgres)', () => {
 
   test('create -> 201 DRAFT with Nhom-3 defaults', async () => {
     await pool.query(
-      `INSERT INTO question (topic_id, rubric_id, content, status, source, bloom_level, language)
-       VALUES ($1, $2, $3, 'APPROVED', 'MANUAL', 'UNDERSTAND', 'en')`,
+      `INSERT INTO question (topic_id, rubric_id, content, status, source, bloom_level, language,
+                             reference_answer, key_points)
+       VALUES ($1, $2, $3, 'APPROVED', 'MANUAL', 'UNDERSTAND', 'en',
+               'Reference answer.', '["Key point"]'::jsonb)`,
       [topicId, rubricId, `Seed approved question ${Date.now()}`],
     );
     const res = await request(app)
@@ -321,8 +323,9 @@ describeDb('exam-sessions API e2e (requires Postgres)', () => {
     for (let i = 0; i < levels.length; i += 1) {
       // eslint-disable-next-line no-await-in-loop
       await pool.query(
-        `INSERT INTO question (topic_id, rubric_id, content, status, source, bloom_level)
-         VALUES ($1, $2, $3, 'APPROVED', 'AI', $4)`,
+        `INSERT INTO question (topic_id, rubric_id, content, status, source, bloom_level,
+                               reference_answer, key_points)
+         VALUES ($1, $2, $3, 'APPROVED', 'AI', $4, 'Reference answer.', '["Key point"]'::jsonb)`,
         [topicId, rubricId, `Approved Q${i} ${Date.now()}`, levels[i]],
       );
     }

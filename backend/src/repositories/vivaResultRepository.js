@@ -18,8 +18,8 @@ class VivaResultRepository {
   async createPendingIfAbsent(interviewId, tx) {
     const db = tx || this.db;
     const query = `
-      INSERT INTO viva_result (interview_id, status)
-      VALUES ($1, 'PENDING')
+      INSERT INTO viva_result (interview_id, status, grading_stage, grading_updated_at)
+      VALUES ($1, 'PENDING', 'QUEUED', now())
       ON CONFLICT (interview_id) DO UPDATE SET interview_id = EXCLUDED.interview_id
       RETURNING *
     `;
@@ -39,6 +39,7 @@ class VivaResultRepository {
     const query = `
       SELECT vr.viva_result_id, vr.interview_id, vr.status, vr.ai_total_score, vr.final_total_score,
              vr.finalized_by, vr.finalized_at,
+             vr.grading_stage, vr.grading_current, vr.grading_total, vr.grading_updated_at,
              vi.exam_session_id, vi.student_id, vi.started_at, vi.ended_at,
              u.full_name AS student_name, u.code AS student_code, u.email AS student_email,
              (SELECT qe.flag_reason FROM question_evaluation qe WHERE qe.result_id = vr.viva_result_id AND qe.flag_reason IS NOT NULL LIMIT 1) AS flag_reason
@@ -52,7 +53,7 @@ class VivaResultRepository {
     return res.rows;
   }
 
-  async updateResult(vivaResultId, fields = {}) {
+  async updateResult(vivaResultId, fields = {}, client = this.db) {
     const keys = Object.keys(fields);
     if (keys.length === 0) return this.findById(vivaResultId);
 
@@ -70,12 +71,21 @@ class VivaResultRepository {
       WHERE viva_result_id = $${values.length}
       RETURNING *
     `;
-    const res = await this.db.query(query, values);
+    const res = await client.query(query, values);
     return res.rows[0] || null;
   }
 
-  async saveEvaluationsAndCriteria(resultId, evaluations = []) {
-    return this.db.withTransaction(async (client) => {
+  async updateGradingProgress(vivaResultId, { stage, current = null, total = null }) {
+    return this.updateResult(vivaResultId, {
+      grading_stage: stage,
+      grading_current: current,
+      grading_total: total,
+      grading_updated_at: new Date(),
+    });
+  }
+
+  async saveEvaluationsAndCriteria(resultId, evaluations = [], transaction) {
+    const save = async (client) => {
       // Clear previous evaluations if regrading
       await client.query('DELETE FROM question_evaluation WHERE result_id = $1', [resultId]);
 
@@ -128,6 +138,17 @@ class VivaResultRepository {
         savedEvals.push(savedEval);
       }
       return savedEvals;
+    };
+    return transaction ? save(transaction) : this.db.withTransaction(save);
+  }
+
+  async publishAiGrading(resultId, evaluations, fields) {
+    return this.db.withTransaction(async client => {
+      const current = await client.query('SELECT * FROM viva_result WHERE viva_result_id = $1 FOR UPDATE', [resultId]);
+      if (current.rows[0]?.status === 'FINALIZED') return current.rows[0];
+      if (!current.rows[0]) throw new Error('Grading result disappeared before publication.');
+      await this.saveEvaluationsAndCriteria(resultId, evaluations, client);
+      return this.updateResult(resultId, fields, client);
     });
   }
 
@@ -203,11 +224,14 @@ class VivaResultRepository {
     const evalsRes = await this.db.query(
       `SELECT qe.*,
               aq.order_no, aq.question_id,
-              q.content AS question_content, q.bloom_level, q.reference_answer, q.key_points,
-              q.rationale AS question_rationale
+              aq.knowledge_snapshot, aq.legacy_prompt_source,
+              COALESCE(aq.knowledge_snapshot->>'content', aq.legacy_question_text) AS question_content,
+              aq.knowledge_snapshot->>'bloom_level' AS bloom_level,
+              aq.knowledge_snapshot->>'reference_answer' AS reference_answer,
+              aq.knowledge_snapshot->'key_points' AS key_points,
+              aq.knowledge_snapshot->'rationale' AS question_rationale
        FROM question_evaluation qe
        LEFT JOIN assigned_question aq ON aq.assigned_question_id = qe.assigned_question_id
-       LEFT JOIN question q ON q.question_id = aq.question_id
        WHERE qe.result_id = $1
        ORDER BY aq.order_no ASC NULLS LAST`,
       [vivaResultId]
@@ -217,18 +241,22 @@ class VivaResultRepository {
     // Load criteria for each evaluation
     for (const ev of evaluations) {
       const critRes = await this.db.query(
-        `SELECT cs.*,
-                rc.criterion_name, rc.weight_percent AS criterion_weight, r.max_score AS criterion_max_score,
-                pl.label AS level_label, pl.description AS level_description
-         FROM criterion_score cs
-         JOIN rubric_criterion rc ON rc.rubric_criterion_id = cs.criterion_id
-         JOIN rubric r ON r.rubric_id = rc.rubric_id
-         LEFT JOIN performance_level pl ON pl.performance_level_id = cs.ai_level_id
-         WHERE cs.evaluation_id = $1
-         ORDER BY rc.order_index ASC, rc.rubric_criterion_id ASC`,
+        `SELECT cs.* FROM criterion_score cs
+         WHERE cs.evaluation_id = $1 ORDER BY cs.criterion_score_id`,
         [ev.question_evaluation_id]
       );
-      ev.criteria = critRes.rows;
+      const snapshot = ev.knowledge_snapshot;
+      const frozenCriteria = snapshot?.rubric_snapshot?.criteria || [];
+      ev.criteria = critRes.rows.map(cs => {
+        const criterion = frozenCriteria.find(c => Number(c.rubric_criterion_id) === Number(cs.criterion_id));
+        const level = criterion?.performance_levels?.find(l => Number(l.performance_level_id) === Number(cs.ai_level_id));
+        return { ...cs,
+          criterion_name: criterion?.criterion_name ?? null,
+          criterion_weight: criterion?.weight_percent ?? null,
+          criterion_max_score: snapshot?.rubric_snapshot?.max_score ?? null,
+          level_label: level?.label ?? null, level_description: level?.description ?? null,
+        };
+      });
 
       // Load turns for this assigned question
       const turnsRes = await this.db.query(
@@ -238,16 +266,27 @@ class VivaResultRepository {
          ORDER BY qt.sequence_no ASC`,
         [result.interview_id, ev.assigned_question_id]
       );
-      ev.turns = turnsRes.rows;
+      // Examiner turn view: surface the student's STT dispute so the lecturer
+      // knows to replay the turn audio. Raw columns stay, camelCase fields are
+      // added for the grading UI.
+      ev.turns = turnsRes.rows.map((turn) => ({
+        ...turn,
+        sttDisputed: turn.stt_disputed_at != null,
+        sttDisputeNote: turn.stt_dispute_note ?? null,
+        sttDisputedAt: turn.stt_disputed_at == null
+          ? null
+          : (turn.stt_disputed_at instanceof Date
+            ? turn.stt_disputed_at.toISOString()
+            : new Date(turn.stt_disputed_at).toISOString()),
+      }));
     }
 
     // Load adjustments history
     const adjRes = await this.db.query(
-      `SELECT sa.*, cs.criterion_id, rc.criterion_name, u.full_name AS adjusted_by_name
+      `SELECT sa.*, cs.criterion_id, qe.assigned_question_id, u.full_name AS adjusted_by_name
        FROM score_adjustment sa
        JOIN criterion_score cs ON cs.criterion_score_id = sa.criterion_score_id
        JOIN question_evaluation qe ON qe.question_evaluation_id = cs.evaluation_id
-       JOIN rubric_criterion rc ON rc.rubric_criterion_id = cs.criterion_id
        LEFT JOIN app_user u ON u.app_user_id = sa.adjusted_by
        WHERE qe.result_id = $1
        ORDER BY sa.adjusted_at DESC`,
@@ -257,7 +296,11 @@ class VivaResultRepository {
     return {
       result,
       evaluations,
-      scoreAdjustments: adjRes.rows,
+      scoreAdjustments: adjRes.rows.map(row => {
+        const ev = evaluations.find(e => e.assigned_question_id === row.assigned_question_id);
+        const criterion = ev?.knowledge_snapshot?.rubric_snapshot?.criteria?.find(c => Number(c.rubric_criterion_id) === Number(row.criterion_id));
+        return { ...row, criterion_name: criterion?.criterion_name ?? null };
+      }),
     };
   }
 
@@ -327,11 +370,10 @@ class VivaResultRepository {
     // Load question evaluations
     const evalsRes = await db.query(
       `SELECT qe.question_evaluation_id, qe.ai_score, qe.final_score,
-              aq.order_no,
-              q.content AS question_content
+              aq.order_no, aq.knowledge_snapshot AS internal_snapshot,
+              COALESCE(aq.knowledge_snapshot->>'content', aq.legacy_question_text) AS question_content
        FROM question_evaluation qe
        LEFT JOIN assigned_question aq ON aq.assigned_question_id = qe.assigned_question_id
-       LEFT JOIN question q ON q.question_id = aq.question_id
        WHERE qe.result_id = $1
        ORDER BY aq.order_no ASC NULLS LAST`,
       [vivaResultId]
@@ -340,15 +382,20 @@ class VivaResultRepository {
 
     for (const ev of evaluations) {
       const critRes = await db.query(
-        `SELECT cs.criterion_score_id, cs.ai_score, cs.final_score,
-                rc.name AS criterion_name, rc.weight AS criterion_weight, rc.max_score AS criterion_max_score
-         FROM criterion_score cs
-         JOIN rubric_criterion rc ON rc.rubric_criterion_id = cs.criterion_id
-         WHERE cs.evaluation_id = $1
-         ORDER BY rc.order_index ASC, rc.rubric_criterion_id ASC`,
+        `SELECT cs.criterion_score_id, cs.criterion_id, cs.ai_score, cs.final_score
+         FROM criterion_score cs WHERE cs.evaluation_id = $1 ORDER BY cs.criterion_score_id`,
         [ev.question_evaluation_id]
       );
-      ev.criteria = critRes.rows;
+      const rubric = ev.internal_snapshot?.rubric_snapshot;
+      ev.criteria = critRes.rows.map(cs => {
+        const criterion = rubric?.criteria?.find(c => Number(c.rubric_criterion_id) === Number(cs.criterion_id));
+        return { criterion_score_id: cs.criterion_score_id, ai_score: cs.ai_score, final_score: cs.final_score,
+          criterion_name: criterion?.criterion_name ?? null,
+          criterion_weight: criterion?.weight_percent ?? null, criterion_max_score: rubric?.max_score ?? null,
+        };
+      });
+      // Explicitly discard the internal evidence before returning student DTOs.
+      delete ev.internal_snapshot;
     }
 
     return {

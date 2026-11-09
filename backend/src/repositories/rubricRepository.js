@@ -12,16 +12,16 @@ class RubricRepository {
     return this._attachCriteria(rubrics.rows, criteria.rows, levels);
   }
 
-  async findById(rubricId) {
-    const rubric = await this.db.query('SELECT * FROM rubric WHERE rubric_id = $1', [rubricId]);
+  async findById(rubricId, client = this.db) {
+    const rubric = await client.query('SELECT * FROM rubric WHERE rubric_id = $1', [rubricId]);
     if (!rubric.rows[0]) {
       return null;
     }
-    const criteria = await this.db.query(
+    const criteria = await client.query(
       'SELECT * FROM rubric_criterion WHERE rubric_id = $1 ORDER BY order_index ASC, rubric_criterion_id ASC',
       [rubricId],
     );
-    const levels = await this._loadLevelsForCriteria(criteria.rows);
+    const levels = await this._loadLevelsForCriteria(criteria.rows, client);
     return {
       ...rubric.rows[0],
       criteria: this._withLevels(criteria.rows, levels),

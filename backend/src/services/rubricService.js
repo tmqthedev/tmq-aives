@@ -37,9 +37,10 @@ function toApiRubric(record) {
 }
 
 class RubricService {
-  constructor({ repository, subjectScope }) {
+  constructor({ repository, subjectScope, realtimeBus }) {
     this.repository = repository;
     this.subjectScope = subjectScope;
+    this.realtimeBus = realtimeBus || null;
   }
 
   _scopeFor(user) {
@@ -90,6 +91,8 @@ class RubricService {
       name: validated.name,
     });
 
+    this._publishRubric(row, 'created');
+
     return toApiRubric(row);
   }
 
@@ -123,6 +126,8 @@ class RubricService {
       throw this._notFound();
     }
 
+    this._publishRubric(row, 'updated');
+
     return toApiRubric(row);
   }
 
@@ -136,6 +141,7 @@ class RubricService {
     if (!row) {
       throw this._notFound();
     }
+    this._publishRubric(row, 'created');
     return toApiRubric(row);
   }
 
@@ -155,7 +161,19 @@ class RubricService {
     }
 
     const row = await this.repository.deleteById(rubricId);
+    this._publishRubric(existing, 'deleted', rubricId);
     return toApiRubric({ ...row, criteria: [] });
+  }
+
+  _publishRubric(rubric, action, fallbackId = null) {
+    if (!this.realtimeBus || typeof this.realtimeBus.publish !== 'function' || !rubric) return;
+    try {
+      this.realtimeBus.publish('rubric', {
+        action,
+        rubricId: Number(rubric.rubric_id ?? fallbackId),
+        subjectId: rubric.subject_id == null ? null : Number(rubric.subject_id),
+      });
+    } catch { /* A committed rubric write must not fail because invalidation failed. */ }
   }
 
   _notFound() {

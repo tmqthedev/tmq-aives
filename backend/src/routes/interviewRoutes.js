@@ -15,8 +15,10 @@ function createInterviewRouter(interviewController, auth = {}) {
 
   router.post('/', ...studentGuard, interviewController.startOrResume);
   router.get('/:id', ...studentGuard, interviewController.getCurrentState);
+  router.get('/:id/transcript', ...studentGuard, interviewController.getTranscript);
   router.post('/:id/turns/:turnId/played', ...studentGuard, interviewController.markQuestionPlayed);
   router.post('/:id/turns/:turnId/answer', ...studentGuard, upload.single('audio'), interviewController.submitAnswer);
+  router.post('/:id/turns/:turnId/stt-dispute', ...studentGuard, interviewController.disputeStt);
 
   return router;
 }

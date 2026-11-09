@@ -31,6 +31,7 @@ class FakeQuestionRepo {
       bloom_level: payload.bloomLevel ?? null,
       language: payload.language ?? null,
       source: payload.source ?? null,
+      reference_answer: payload.referenceAnswer ?? null,
       key_points: payload.keyPoints ?? null,
     };
     this.rows.set(id, row);
@@ -89,7 +90,7 @@ test('buildImportTemplate has exactly the seven headers', async () => {
   assert.deepEqual(header, IMPORT_HEADERS);
 });
 
-test('importQuestions writes every row as source=IMPORT status=APPROVED on a valid file', async () => {
+test('importQuestions writes every row as source=IMPORT status=PENDING_REVIEW on a valid file', async () => {
   const { service, repository } = build();
   const buffer = await buildXlsx([
     ['What is a stack?', 'T1', 'REMEMBER', 'en', 'A LIFO structure.', 'LIFO|push|pop', '5'],
@@ -103,14 +104,31 @@ test('importQuestions writes every row as source=IMPORT status=APPROVED on a val
   assert.equal(rows.length, 2);
   for (const row of rows) {
     assert.equal(row.source, 'IMPORT');
-    assert.equal(row.status, 'APPROVED');
+    assert.equal(row.status, 'PENDING_REVIEW');
     assert.equal(row.topic_id, 10);
   }
-  // Key points were parsed from the pipe-separated column.
+  // Key points were parsed from the pipe-separated column and the reference
+  // answer was stored, ready for a lecturer to review before approval.
   assert.deepEqual(rows[0].key_points, ['LIFO', 'push', 'pop']);
+  assert.equal(rows[0].reference_answer, 'A LIFO structure.');
   // Rubric code resolved on the first row, blank on the second.
   assert.equal(rows[0].rubric_id, 5);
   assert.equal(rows[1].rubric_id, null);
+});
+
+test('importQuestions keeps a fully complete row in PENDING_REVIEW (never auto-approves)', async () => {
+  const { service, repository } = build();
+  const buffer = await buildXlsx([
+    ['What is a stack?', 'T1', 'REMEMBER', 'en', 'A LIFO structure.', 'LIFO|push|pop', '5'],
+  ]);
+
+  const result = await service.importQuestions(buffer);
+  assert.equal(result.ok, true);
+  const [row] = [...repository.rows.values()];
+  assert.equal(row.status, 'PENDING_REVIEW');
+  assert.equal(row.rubric_id, 5);
+  assert.ok(row.reference_answer);
+  assert.ok(row.key_points.length > 0);
 });
 
 test('importQuestions performs ZERO writes when any row is invalid and returns per-row errors', async () => {

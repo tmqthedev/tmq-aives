@@ -9,6 +9,10 @@ const { createApp } = require('../app');
 const { makeIngestMaterialHandler, makeGenerateQuestionsHandler } = require('../jobs/handlers');
 const { RubricRepository } = require('../repositories/rubricRepository');
 const { CourseMaterialRepository } = require('../repositories/courseMaterialRepository');
+const { QuestionService } = require('../services/questionService');
+const { SubjectScope } = require('../services/subjectScope');
+const { SubjectRepository } = require('../repositories/subjectRepository');
+const { approveSyntheticSmokeQuestions } = require('./syntheticSmokeQuestions');
 
 const notes = {
   VI: 'TCP cung cấp truyền dữ liệu tin cậy bằng số thứ tự, xác nhận ACK và truyền lại. Số thứ tự giúp bên nhận sắp xếp dữ liệu và nhận biết dữ liệu bị thiếu. Bên nhận gửi ACK để xác nhận dữ liệu đã nhận. Khi quá thời gian chờ ACK, bên gửi truyền lại dữ liệu. Bắt tay ba bước SYN, SYN-ACK, ACK thiết lập kết nối trước khi trao đổi dữ liệu. Điều khiển luồng dùng cửa sổ nhận để tránh làm quá tải bên nhận.',
@@ -44,6 +48,11 @@ async function main() {
   const engine = app.interviewContext.interviewService;
   const rubricRepo = new RubricRepository(db);
   const materials = new CourseMaterialRepository(db);
+  const questionService = new QuestionService({
+    repository: deps.questionRepository, rubricRepository: rubricRepo,
+    topicRepository: deps.topicRepository, db,
+    subjectScope: new SubjectScope({ subjectRepository: new SubjectRepository(db) }),
+  });
   try {
     if (env.storageBucketAutoCreate) await deps.awsClients.ensureBuckets([env.audioBucket, env.materialsBucket]);
     const lecturer = (await db.query(`INSERT INTO app_user (email, full_name, role, status)
@@ -101,7 +110,10 @@ async function main() {
       assert.equal(job.status, 'COMPLETED');
       assert.ok(job.generated_count >= 1, `No grounded ${language} question survived generation`);
       entry.generatedCount = job.generated_count;
-      await db.query("UPDATE question SET status = 'APPROVED', rubric_id = $1 WHERE generation_job_id = $2", [rubric.rubric_id, generated.question_generation_job_id]);
+      entry.approvedQuestionIds = await approveSyntheticSmokeQuestions({
+        db, questionService, run, jobId: generated.question_generation_job_id,
+        topicId, lecturerId: lecturer, rubricId: rubric.rubric_id, scenario,
+      });
       const exam = await deps.examSessionRepository.create({ subjectId, topicId, title: `[TEST] ${run} ${language}`,
         language, mainQuestionCount: 1, maxFollowUpsPerQuestion: 1, answerTimeLimitSec: 120,
         thinkTimeSec: 0, sessionTimeLimitSec: 1800, status: 'OPEN', createdBy: lecturer,

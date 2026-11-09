@@ -16,6 +16,9 @@ const STUDENT_FORBIDDEN_KEYS = [
   'key_points',
   'keyPoints',
   'reference_answer',
+  'knowledge_snapshot',
+  'rubric_snapshot',
+  'source_refs_snapshot',
   'answer_text',
   'answerText',
   'transcript',
@@ -97,8 +100,11 @@ function toStudentInterviewView({
 }
 
 // Deep key scan: throws when any forbidden key appears anywhere in `obj`.
-function assertStudentSafe(obj) {
+// `allowedKeys` relaxes specific keys for views where the student is entitled
+// to that content (e.g. their own answer transcript in the history view).
+function assertStudentSafe(obj, { allowedKeys = [] } = {}) {
   const forbidden = new Set(STUDENT_FORBIDDEN_KEYS);
+  for (const key of allowedKeys) forbidden.delete(key);
   const stack = [{ value: obj, path: '$' }];
   while (stack.length > 0) {
     const { value, path } = stack.pop();

@@ -34,6 +34,7 @@ class MaterialService {
     awsClients,
     enqueueJob,
     env,
+    realtimeBus,
     logger = console,
   }) {
     this.courseMaterialRepository = courseMaterialRepository;
@@ -42,6 +43,7 @@ class MaterialService {
     this.awsClients = awsClients;
     this.enqueueJob = enqueueJob;
     this.env = env || {};
+    this.realtimeBus = realtimeBus || null;
     this.logger = logger;
     this.bucket = this.env.materialsBucket || 'local-materials-bucket';
   }
@@ -128,6 +130,8 @@ class MaterialService {
       uploadedBy: user ? user.id : null,
     });
 
+    this._publishMaterial(material, 'created');
+
     await this.enqueueJob('INGEST_MATERIAL', { materialId: material.course_material_id });
 
     return material;
@@ -168,7 +172,22 @@ class MaterialService {
       }
     }
 
-    return this.courseMaterialRepository.deleteById(materialId);
+    const deleted = await this.courseMaterialRepository.deleteById(materialId);
+    this._publishMaterial(material, 'deleted', materialId);
+    return deleted;
+  }
+
+  _publishMaterial(material, action, fallbackId = null) {
+    if (!this.realtimeBus || typeof this.realtimeBus.publish !== 'function' || !material) return;
+    try {
+      this.realtimeBus.publish('material', {
+        action,
+        materialId: Number(material.course_material_id ?? fallbackId),
+        subjectId: material.subject_id == null ? null : Number(material.subject_id),
+      });
+    } catch (err) {
+      this.logger.warn({ err }, 'material realtime publish failed');
+    }
   }
 }
 

@@ -12,6 +12,9 @@ test('submitAnswer parses multipart JSON signals and transcript before calling t
       serviceArgs = args;
       return { status: 'COMPLETED' };
     },
+    async getTranscribedTurn({ user, interviewId, turnId }) {
+      return { interviewId, turnId, sequenceNo: 1, transcript: 'Synthetic answer' };
+    },
   });
 
   await controller.submitAnswer({
@@ -43,7 +46,10 @@ test('submitAnswer parses multipart JSON signals and transcript before calling t
   assert.equal(serviceArgs.audio.toString(), 'synthetic audio');
   assert.equal(serviceArgs.contentType, 'audio/wav');
   assert.equal(serviceArgs.timedOut, false);
-  assert.deepEqual(responseBody, { status: 'COMPLETED' });
+  assert.deepEqual(responseBody, {
+    status: 'COMPLETED',
+    transcribedTurn: { interviewId: '13', turnId: '23', sequenceNo: 1, transcript: 'Synthetic answer' },
+  });
 });
 
 test('submitAnswer keeps JSON request objects intact', async () => {
@@ -54,6 +60,9 @@ test('submitAnswer keeps JSON request objects intact', async () => {
     async submitAnswer(args) {
       serviceArgs = args;
       return {};
+    },
+    async getTranscribedTurn() {
+      return null;
     },
   });
 

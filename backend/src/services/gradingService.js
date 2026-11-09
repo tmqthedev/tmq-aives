@@ -1,3 +1,5 @@
+const { validateCriterionEvidence } = require('../domain/gradingEvidence');
+const { readKnowledgeSnapshot } = require('../interview/knowledgeSnapshot');
 // GradingService: Coordinates automated AI scoring via Bedrock Nova Pro and lecturer review.
 //
 // Rules from docs/e2e-plan-management.md (Section 4):
@@ -38,14 +40,34 @@ function badRequest(message = 'Bad request', code = 'VALIDATION_ERROR') {
   return err;
 }
 
+function toIso(value) {
+  if (value == null) return null;
+  const d = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+// Examiner-facing progress DTO. Null when grading has not started (e.g. rows
+// created before the durable progress columns existed). Never carries scores.
+function toProgress(row) {
+  if (!row || row.grading_stage == null) return null;
+  return {
+    stage: row.grading_stage,
+    current: row.grading_current != null ? Number(row.grading_current) : null,
+    total: row.grading_total != null ? Number(row.grading_total) : null,
+    updatedAt: toIso(row.grading_updated_at),
+  };
+}
+
 class GradingService {
   constructor({
     db,
     vivaResultRepository,
     llmAdapter,
     enqueueJob,
+    realtimeBus = null,
     logger = console,
   }) {
+    this.realtimeBus = realtimeBus;
     this.db = db;
     this.vivaResultRepo = vivaResultRepository;
     this.llmAdapter = llmAdapter;
@@ -61,6 +83,8 @@ class GradingService {
 
     // Find or ensure viva_result row
     let vivaResult = await this.vivaResultRepo.findByInterviewId(interviewId);
+    // Queued retries must never overwrite a lecturer's finalized result.
+    if (vivaResult?.status === 'FINALIZED') return vivaResult;
     if (!vivaResult) {
       const initRes = await this.db.query(
         'INSERT INTO viva_result (interview_id, status) VALUES ($1, $2) RETURNING *',
@@ -70,6 +94,8 @@ class GradingService {
     } else {
       await this.vivaResultRepo.updateResult(vivaResult.viva_result_id, { status: 'AI_SCORING' });
     }
+    await this._publishResult({ ...vivaResult, interview_id: interviewId }, 'status_changed', 'AI_SCORING');
+    await this._setGradingProgress({ ...vivaResult, interview_id: interviewId }, { stage: 'PREPARING', status: 'AI_SCORING' });
 
     // Load interview, exam session, and language
     const ivRes = await this.db.query(
@@ -86,15 +112,37 @@ class GradingService {
 
     // Load assigned questions
     const aqRes = await this.db.query(
-      `SELECT aq.*, q.content AS question_content, q.bloom_level, q.reference_answer, q.key_points,
-              q.rubric_id
+      `SELECT aq.*
        FROM assigned_question aq
-       JOIN question q ON q.question_id = aq.question_id
        WHERE aq.interview_id = $1
        ORDER BY aq.order_no ASC`,
       [interviewId]
     );
     const assignedQuestions = aqRes.rows;
+    // Missing historical knowledge is terminal content uncertainty, not an LLM
+    // retry. Preserve original turns/evaluations and route to specialist review.
+    try {
+      if (!assignedQuestions.length) readKnowledgeSnapshot(null);
+      assignedQuestions.forEach(readKnowledgeSnapshot);
+    } catch (error) {
+      if (error.code !== 'KNOWLEDGE_SNAPSHOT_MISSING') throw error;
+      const adjustments = await this.db.query(
+        `SELECT 1 FROM score_adjustment sa
+         JOIN criterion_score cs ON cs.criterion_score_id = sa.criterion_score_id
+         JOIN question_evaluation qe ON qe.question_evaluation_id = cs.evaluation_id
+         WHERE qe.result_id = $1 LIMIT 1`, [vivaResult.viva_result_id],
+      );
+      const humanReviewed = vivaResult.finalized_by != null || adjustments.rows.length > 0;
+      const flagged = await this.vivaResultRepo.updateResult(vivaResult.viva_result_id, {
+        status: 'FLAGGED', ai_total_score: null,
+        ...(!humanReviewed ? { final_total_score: null } : {}),
+        grading_review_reason: 'KNOWLEDGE_SNAPSHOT_MISSING: Original approved knowledge unavailable; manual review required.',
+      });
+      await this._setGradingProgress({ ...vivaResult, ...flagged, interview_id: interviewId }, { stage: 'AWAITING_REVIEW', status: 'FLAGGED' });
+      await this._publishResult({ ...vivaResult, interview_id: interviewId }, 'status_changed', 'FLAGGED');
+      return flagged;
+    }
+
 
     // Load all turns
     const turnsRes = await this.db.query(
@@ -108,6 +156,12 @@ class GradingService {
     let llmFailed = false;
 
     for (const aq of assignedQuestions) {
+      await this._setGradingProgress({ ...vivaResult, interview_id: interviewId }, {
+        stage: 'SCORING',
+        current: assignedQuestions.indexOf(aq) + 1,
+        total: assignedQuestions.length,
+        status: 'AI_SCORING',
+      });
       const qTurns = allTurns.filter((t) => t.assigned_question_id === aq.assigned_question_id);
       const history = qTurns.map((t) => ({
         turnType: t.turn_type,
@@ -116,35 +170,18 @@ class GradingService {
         status: t.status,
       }));
 
-      // Load rubric criteria with performance levels
-      const rcRes = await this.db.query(
-        `SELECT rc.*
-         FROM rubric_criterion rc
-         WHERE rc.rubric_id = $1
-         ORDER BY rc.order_index ASC`,
-        [aq.rubric_id]
-      );
-      const criteria = rcRes.rows;
-
-      for (const crit of criteria) {
-        const plRes = await this.db.query(
-          `SELECT * FROM performance_level
-           WHERE criterion_id = $1
-           ORDER BY order_no ASC, performance_level_id ASC`,
-          [crit.rubric_criterion_id]
-        );
-        crit.performance_levels = plRes.rows;
-      }
+      const knowledge = readKnowledgeSnapshot(aq);
+      const criteria = knowledge.rubric_snapshot.criteria.map(c => ({ ...c, max_score: knowledge.rubric_snapshot.max_score }));
 
       let aiGradingResult = null;
       try {
         aiGradingResult = await this.llmAdapter.gradeQuestion({
           language: interview.exam_language || 'EN',
           mainQuestion: {
-            content: aq.question_content,
-            bloom_level: aq.bloom_level,
-            reference_answer: aq.reference_answer,
-            key_points: aq.key_points,
+            content: knowledge.content,
+            bloom_level: knowledge.bloom_level,
+            reference_answer: knowledge.reference_answer,
+            key_points: knowledge.key_points,
           },
           history,
           rubricCriteria: criteria,
@@ -176,42 +213,45 @@ class GradingService {
         const byCriterion = new Map(criteria.map((criterion) => [
           Number(criterion.rubric_criterion_id), criterion,
         ]));
-        const invalidLevels = [];
+        const issues = typeof aiGradingResult.confidence === 'number' && Number.isFinite(aiGradingResult.confidence)
+          && aiGradingResult.confidence >= 0 && aiGradingResult.confidence <= 1 ? [] : ['INVALID_CONFIDENCE'];
         const seen = new Set();
         const safeEvaluations = aiGradingResult.criteria_evaluations.flatMap((item) => {
-          const criterionId = Number(item.criterion_id);
+          const criterionId = Number(item?.criterion_id);
           const criterion = byCriterion.get(criterionId);
-          if (!criterion || seen.has(criterionId)) return [];
+          if (!criterion || seen.has(criterionId)) {
+            issues.push('UNKNOWN_OR_DUPLICATE_CRITERION');
+            return [];
+          }
           seen.add(criterionId);
-          const levels = criterion.performance_levels || [];
-          const levelId = Number(item.ai_level_id);
-          const validLevel = levels.some((level) => Number(level.performance_level_id) === levelId);
-          if (levels.length > 0 && !validLevel) invalidLevels.push(criterionId);
-          return [{ ...item, criterion_id: criterionId, ai_level_id: validLevel ? levelId : null }];
+          const checked = validateCriterionEvidence(item, { knowledge, history, criterion });
+          issues.push(...checked.reasons.map(reason => `${criterionId}:${reason}`));
+          return [{ criterion_id: criterionId, ai_level_id: checked.levelId,
+            ai_score: checked.score, evidence: checked.valid,
+            // Do not persist free-form model claims as verified conclusions.
+            ai_justification: checked.reasons.length
+              ? 'Evidence or score could not be verified; lecturer review required'
+              : `Transcript evidence supports approved key point indices: ${[...new Set(checked.valid.map(e => e.key_point_index))].join(', ')}`,
+          }];
         });
-        // The model may skip rubric criteria even after retries: keep what it
-        // graded, add the rest as ungraded rows and flag the question for the
-        // lecturer instead of presenting a total built from a subset.
         const missing = missingCriterionIds({ criteria_evaluations: safeEvaluations }, criteria);
-        const qScore = calculateQuestionScore(safeEvaluations, criteria);
-        questionScores.push(qScore);
+        if (missing.length) issues.push(`MISSING_CRITERIA:${missing.join(',')}`);
+        const qScore = issues.length ? null : calculateQuestionScore(safeEvaluations, criteria);
+        if (qScore != null) questionScores.push(qScore);
+        const supported = new Set(safeEvaluations.filter(e => e.ai_score != null).flatMap(e => e.evidence.map(proof => proof.key_point_index)));
 
         evaluationsToSave.push({
           assigned_question_id: aq.assigned_question_id,
           ai_score: qScore,
           final_score: qScore,
           confidence: aiGradingResult.confidence ?? 0.85,
-          strengths: aiGradingResult.strengths || '',
-          weaknesses: aiGradingResult.weaknesses || '',
-          missing_points: aiGradingResult.missing_points || [],
-          feedback: aiGradingResult.feedback || '',
-          flag_reason: missing.length > 0
-            ? `AI grading incomplete: criteria ${missing.join(', ')} not graded`
-            : invalidLevels.length > 0
-              ? `AI grading used invalid performance levels for criteria ${invalidLevels.join(', ')}`
-              : null,
+          strengths: knowledge.key_points.filter((_point, index) => supported.has(index)).join('; '),
+          weaknesses: '',
+          missing_points: knowledge.key_points.filter((_point, index) => !supported.has(index)),
+          feedback: issues.length ? 'Unverified grading evidence; lecturer review required.' : 'Evidence-grounded AI suggestion; lecturer approval required.',
+          flag_reason: issues.length ? `GRADING_EVIDENCE_INVALID: ${[...new Set(issues)].join('; ')}` : null,
           model_id: 'apac.amazon.nova-pro-v1:0',
-          prompt_version: '1.0',
+          prompt_version: '2.0',
           criteria: [
             ...safeEvaluations.map((ce) => ({
               criterion_id: ce.criterion_id,
@@ -244,7 +284,7 @@ class GradingService {
           feedback: 'AI scoring unavailable; manual grading required.',
           flag_reason: 'AI grading service failure',
           model_id: 'apac.amazon.nova-pro-v1:0',
-          prompt_version: '1.0',
+          prompt_version: '2.0',
           criteria: criteria.map((c) => ({
             criterion_id: c.rubric_criterion_id,
             ai_level_id: null,
@@ -257,14 +297,9 @@ class GradingService {
       }
     }
 
-    // Save all evaluations and criteria records
-    await this.vivaResultRepo.saveEvaluationsAndCriteria(
-      vivaResult.viva_result_id,
-      evaluationsToSave
-    );
-
     // Compute viva total score and check flagging
-    const vivaTotal = calculateVivaTotalScore(questionScores);
+    const incomplete = evaluationsToSave.some(e => e.ai_score == null);
+    const vivaTotal = incomplete ? null : calculateVivaTotalScore(questionScores);
     const flagCheck = detectFlagReason({
       questionEvaluations: evaluationsToSave,
       turns: allTurns,
@@ -273,8 +308,11 @@ class GradingService {
 
     const nextStatus = flagCheck.isFlagged ? 'FLAGGED' : 'AI_SUGGESTED';
 
-    const updated = await this.vivaResultRepo.updateResult(vivaResult.viva_result_id, {
+    await this._setGradingProgress({ ...vivaResult, interview_id: interviewId }, { stage: 'AGGREGATING', status: 'AI_SCORING' });
+
+    const updated = await this.vivaResultRepo.publishAiGrading(vivaResult.viva_result_id, evaluationsToSave, {
       status: nextStatus,
+      grading_review_reason: null,
       ai_total_score: vivaTotal,
       final_total_score: vivaTotal,
     });
@@ -282,6 +320,8 @@ class GradingService {
     this.logger.info(
       `[GradingService] Interview ${interviewId} graded: status=${nextStatus}, totalScore=${vivaTotal}`
     );
+    await this._publishResult({ ...vivaResult, interview_id: interviewId }, 'status_changed', nextStatus);
+    await this._setGradingProgress({ ...vivaResult, ...updated, interview_id: interviewId }, { stage: 'AWAITING_REVIEW', status: nextStatus });
 
     return updated;
   }
@@ -298,7 +338,15 @@ class GradingService {
         : false);
 
     const rows = await this.vivaResultRepo.listBySession(examSessionId);
-    return rows.map((r) => ({ ...r, canGrade: Boolean(canGrade) }));
+    return rows.map((r) => {
+      const scoring = r.status === 'AI_SCORING' || r.status === 'PENDING';
+      return {
+        ...r,
+        ...(scoring ? { ai_total_score: null, final_total_score: null, flag_reason: null } : {}),
+        progress: toProgress(r),
+        canGrade: Boolean(canGrade),
+      };
+    });
   }
 
   /**
@@ -316,11 +364,22 @@ class GradingService {
         ? await this.vivaResultRepo.isExaminerOrCreator(detail.result.exam_session_id, user.id)
         : false);
 
+    const scoring = detail.result.status === 'AI_SCORING' || detail.result.status === 'PENDING';
     return {
       ...detail,
+      ...(scoring ? {
+        scoreAdjustments: [],
+        evaluations: detail.evaluations.map(e => ({ ...e, ai_score: null, final_score: null,
+          confidence: null, strengths: '', weaknesses: '', missing_points: [], feedback: '', flag_reason: null,
+          criteria: (e.criteria || []).map(c => ({ ...c, ai_score: null, final_score: null,
+            ai_justification: '', evidence: [], ai_level_id: null, level_label: null, level_description: null })),
+        })),
+      } : {}),
       canGrade: Boolean(canGrade),
       result: {
         ...detail.result,
+        ...(scoring ? { ai_total_score: null, final_total_score: null, grading_review_reason: null } : {}),
+        progress: toProgress(detail.result),
         canGrade: Boolean(canGrade),
       },
     };
@@ -341,6 +400,8 @@ class GradingService {
       throw notFound(`Associated viva result not found`);
     }
     await this._assertSessionAccess(detail.result.exam_session_id, user, { write: true });
+
+    if (detail.result.status === 'AI_SCORING') throw badRequest('Wait until grading completes.', 'GRADING_IN_PROGRESS');
 
     if (detail.result.status === 'FINALIZED') {
       throw badRequest('Cannot adjust scores on a finalized result. Please reopen it first.', 'RESULT_FINALIZED');
@@ -395,7 +456,9 @@ class GradingService {
       final_total_score: newTotal,
     });
 
-    return this.vivaResultRepo.getFullResultDetail(cs.result_id);
+    const adjusted = await this.vivaResultRepo.getFullResultDetail(cs.result_id);
+    await this._publishResult(adjusted?.result || detail.result, 'updated', adjusted?.result?.status);
+    return adjusted;
   }
 
   /**
@@ -407,15 +470,19 @@ class GradingService {
     if (!detail) throw notFound(`Viva result ${resultId} not found`);
     await this._assertSessionAccess(detail.result.exam_session_id, user, { write: true });
 
+    if (detail.result.status === 'AI_SCORING') throw badRequest('Wait until grading completes.', 'GRADING_IN_PROGRESS');
+
     if (detail.result.status === 'FINALIZED') {
       throw badRequest('Result is already finalized.', 'ALREADY_FINALIZED');
     }
 
-    return this.vivaResultRepo.updateResult(resultId, {
+    const finalized = await this.vivaResultRepo.updateResult(resultId, {
       status: 'FINALIZED',
       finalized_by: user.id,
       finalized_at: new Date(),
     });
+    await this._publishResult(detail.result, 'finalized', 'FINALIZED');
+    return finalized;
   }
 
   /**
@@ -434,11 +501,13 @@ class GradingService {
     const hasFlag = detail.evaluations.some((e) => e.flag_reason);
     const targetStatus = hasFlag ? 'FLAGGED' : 'AI_SUGGESTED';
 
-    return this.vivaResultRepo.updateResult(resultId, {
+    const reopened = await this.vivaResultRepo.updateResult(resultId, {
       status: targetStatus,
       finalized_by: null,
       finalized_at: null,
     });
+    await this._publishResult(detail.result, 'reopened', targetStatus);
+    return reopened;
   }
 
   /**
@@ -449,14 +518,130 @@ class GradingService {
     const detail = await this.vivaResultRepo.getFullResultDetail(resultId);
     if (!detail) throw notFound(`Viva result ${resultId} not found`);
     await this._assertSessionAccess(detail.result.exam_session_id, user, { write: true });
+    if (detail.result.status === 'FINALIZED') {
+      throw badRequest('Reopen the finalized result before requesting a regrade.', 'RESULT_FINALIZED');
+    }
 
-    await this.vivaResultRepo.updateResult(resultId, { status: 'AI_SCORING' });
+    await this.vivaResultRepo.updateResult(resultId, {
+      status: 'AI_SCORING',
+      grading_stage: 'QUEUED',
+      grading_current: null,
+      grading_total: null,
+      grading_updated_at: new Date(),
+    });
 
     if (typeof this.enqueueJob === 'function') {
       await this.enqueueJob('GRADE_INTERVIEW', { interviewId: detail.result.interview_id });
     }
 
+    await this._publishResult(detail.result, 'status_changed', 'AI_SCORING');
+    await this._publishProgress({ ...detail.result, status: 'AI_SCORING' }, 'AI_SCORING');
     return { ok: true, status: 'AI_SCORING' };
+  }
+
+  // Invalidation only, after the write succeeded. Resolves the owning student
+  // and subject (routing-only fields) and never throws.
+  async _publishResult(result, action, status) {
+    if (!this.realtimeBus || !result) return;
+    try {
+      let { exam_session_id: examSessionId, student_id: studentId, subject_id: subjectId } = result;
+      if (examSessionId == null || studentId == null) {
+        const r = await this.db.query(
+          `SELECT vi.exam_session_id, vi.student_id, es.subject_id
+           FROM viva_interview vi JOIN exam_session es ON es.exam_session_id = vi.exam_session_id
+           WHERE vi.viva_interview_id = $1`,
+          [result.interview_id],
+        );
+        ({ exam_session_id: examSessionId, student_id: studentId, subject_id: subjectId } = r.rows[0] || {});
+      }
+      this.realtimeBus.publish('result', {
+        action,
+        resultId: result.viva_result_id,
+        interviewId: result.interview_id,
+        examSessionId,
+        subjectId: subjectId ?? null,
+        status: status || result.status,
+        studentUserId: studentId == null ? null : Number(studentId),
+      });
+    } catch (err) {
+      this.logger?.warn?.({ err }, 'result realtime publish failed');
+    }
+  }
+
+  // Durable stage write + realtime progress event. Best-effort: a failed
+  // progress write must never fail (or retry) the grading job itself.
+  async _setGradingProgress(result, { stage, current = null, total = null, status }) {
+    if (!result || !result.viva_result_id) return;
+    if (typeof this.vivaResultRepo?.updateGradingProgress !== 'function') return;
+    try {
+      await this.vivaResultRepo.updateGradingProgress(result.viva_result_id, { stage, current, total });
+      await this._publishProgress(result, status ?? result.status);
+    } catch (err) {
+      this.logger?.warn?.({ err, resultId: result.viva_result_id, stage }, 'grading progress write failed');
+    }
+  }
+
+  // Realtime invalidation for authorized lecturers/admins only. Deliberately
+  // omits studentUserId so businessSocket never routes progress to the student.
+  async _publishProgress(result, status) {
+    if (!this.realtimeBus || !result) return;
+    try {
+      let { exam_session_id: examSessionId, subject_id: subjectId } = result;
+      if (examSessionId == null) {
+        const r = await this.db.query(
+          `SELECT vi.exam_session_id, es.subject_id
+           FROM viva_interview vi JOIN exam_session es ON es.exam_session_id = vi.exam_session_id
+           WHERE vi.viva_interview_id = $1`,
+          [result.interview_id],
+        );
+        ({ exam_session_id: examSessionId, subject_id: subjectId } = r.rows[0] || {});
+      }
+      this.realtimeBus.publish('result', {
+        action: 'grading_progress',
+        resultId: result.viva_result_id,
+        interviewId: result.interview_id,
+        examSessionId: examSessionId ?? null,
+        subjectId: subjectId ?? null,
+        status: status || result.status,
+      });
+    } catch (err) {
+      this.logger?.warn?.({ err }, 'grading progress realtime publish failed');
+    }
+  }
+
+  // Terminal failure marker for the queue's last attempt: FLAGGED +
+  // GRADING_FAILED + stage FAILED so a result never stays AI_SCORING forever.
+  async markGradingFailed({ interviewId }) {
+    const vivaResult = await this.vivaResultRepo.findByInterviewId(interviewId);
+    if (!vivaResult) return null;
+    if (vivaResult.status === 'FINALIZED') return vivaResult;
+    const updated = await this.vivaResultRepo.updateResult(vivaResult.viva_result_id, {
+      status: 'FLAGGED',
+      grading_review_reason: 'GRADING_FAILED',
+      grading_stage: 'FAILED',
+      grading_current: null,
+      grading_total: null,
+      grading_updated_at: new Date(),
+    });
+    const next = { ...vivaResult, ...updated, interview_id: interviewId };
+    await this._publishProgress(next, 'FLAGGED');
+    await this._publishResult(next, 'status_changed', 'FLAGGED');
+    return updated;
+  }
+
+  // Transient-failure marker set by the handler when the queue will retry.
+  async markGradingRetrying({ interviewId }) {
+    const vivaResult = await this.vivaResultRepo.findByInterviewId(interviewId);
+    if (!vivaResult) return null;
+    if (vivaResult.status === 'FINALIZED') return vivaResult;
+    if (typeof this.vivaResultRepo?.updateGradingProgress !== 'function') return vivaResult;
+    try {
+      await this.vivaResultRepo.updateGradingProgress(vivaResult.viva_result_id, { stage: 'RETRYING' });
+      await this._publishProgress({ ...vivaResult, interview_id: interviewId }, 'AI_SCORING');
+    } catch (err) {
+      this.logger?.warn?.({ err, resultId: vivaResult.viva_result_id }, 'grading RETRYING write failed');
+    }
+    return vivaResult;
   }
 
   /**

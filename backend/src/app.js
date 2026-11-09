@@ -67,6 +67,8 @@ const { createMeRouter } = require('./routes/meRoutes');
 const { InterviewController } = require('./controllers/interviewController');
 const { createInterviewRouter } = require('./routes/interviewRoutes');
 const { attachInterviewSocket } = require('./realtime/interviewSocket');
+const { attachBusinessSocket } = require('./realtime/businessSocket');
+const { RealtimeBus } = require('./realtime/realtimeBus');
 const { GradingService } = require('./services/gradingService');
 const { GradingController } = require('./controllers/gradingController');
 const { createGradingRouter } = require('./routes/gradingRoutes');
@@ -78,6 +80,7 @@ function createApp(overrides = {}) {
   const runtimeEnv = overrides.env || env;
   const clients = overrides.clients || createAwsClients(runtimeEnv);
   const database = overrides.database || createDatabase(runtimeEnv);
+  const realtimeBus = overrides.realtimeBus || new RealtimeBus();
   const embeddingAdapter = overrides.embeddingAdapter || createEmbeddingAdapter(runtimeEnv);
   const rubricRepository = overrides.rubricRepository || new RubricRepository(database);
   const topicRepository = overrides.topicRepository || new TopicRepository(database);
@@ -97,9 +100,12 @@ function createApp(overrides = {}) {
     topicRepository,
     db: database,
     questionSourceRefRepository,
+    realtimeBus,
+    logger,
   });
   const questionController = overrides.questionController || new QuestionController(questionService);
-  const rubricService = overrides.rubricService || new RubricService({ repository: rubricRepository, subjectScope });
+  const rubricService = overrides.rubricService
+    || new RubricService({ repository: rubricRepository, subjectScope, realtimeBus });
   const rubricController = overrides.rubricController || new RubricController(rubricService);
   const topicService = overrides.topicService || new TopicService({ repository: topicRepository, subjectScope });
   const topicController = overrides.topicController || new TopicController(topicService);
@@ -143,6 +149,7 @@ function createApp(overrides = {}) {
       backgroundJobRepository,
       authSessionRepository,
       env: runtimeEnv,
+      realtimeBus,
     });
 
   // --- Materials / ingestion wiring (Step 4 FEAT-001) ---
@@ -163,6 +170,7 @@ function createApp(overrides = {}) {
       awsClients: clients,
       enqueueJob,
       env: runtimeEnv,
+      realtimeBus,
       logger,
     });
   const materialController = overrides.materialController
@@ -183,6 +191,7 @@ function createApp(overrides = {}) {
       rubricRepository,
       embeddingAdapter,
       enqueueJob,
+      realtimeBus,
       logger,
     });
   const questionGenerationController = overrides.questionGenerationController
@@ -219,6 +228,7 @@ function createApp(overrides = {}) {
       ttsAdapter,
       examLaunchService,
       db: database,
+      realtimeBus,
       ...(overrides.clock ? { clock: overrides.clock } : {}),
       logger,
     });
@@ -267,6 +277,7 @@ function createApp(overrides = {}) {
       awsClients: clients,
       enqueueJob,
       env: runtimeEnv,
+      realtimeBus,
       ...(overrides.clock ? { clock: overrides.clock } : {}),
       ...(overrides.random ? { random: overrides.random } : {}),
       logger,
@@ -291,6 +302,7 @@ function createApp(overrides = {}) {
       vivaResultRepository,
       llmAdapter,
       enqueueJob,
+      realtimeBus,
       logger,
     });
   const gradingController = overrides.gradingController
@@ -410,12 +422,26 @@ function createApp(overrides = {}) {
     res.status(status).json(body);
   });
 
-  // Attach realtime Socket.IO to an HTTP server instance
-  app.attachRealtime = (server) => attachInterviewSocket(server, {
-    interviewService,
-    tokenService,
-    qaTurnRepository,
-  });
+  // Attach realtime Socket.IO to an HTTP server instance.
+  // Returns the io Server so /interview and /business share a single instance.
+  app.attachRealtime = (server) => {
+    const io = attachInterviewSocket(server, {
+      interviewService,
+      tokenService,
+      qaTurnRepository,
+    });
+    attachBusinessSocket(server, {
+      tokenService,
+      realtimeBus,
+      subjectScope,
+      examSessionRepository,
+      appUserRepository,
+      subjectRepository,
+      logger,
+      io,
+    });
+    return io;
+  };
 
   // Expose auth building blocks so later features can reuse the same
   // middleware/service wiring (e.g. requireAuth/requireRole).
@@ -463,6 +489,7 @@ function createApp(overrides = {}) {
     questionGenerationJobRepository,
     interviewService,
     topicRepository,
+    realtimeBus,
     gradingService,
     examSessionRepository,
     examLaunchService,
@@ -474,6 +501,11 @@ function createApp(overrides = {}) {
     gradingService,
     gradingController,
     vivaResultRepository,
+  };
+
+  app.realtimeContext = {
+    realtimeBus,
+    attachBusinessSocket,
   };
 
   return app;

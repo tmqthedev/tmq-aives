@@ -1051,3 +1051,50 @@ test('submitAnswer persists speech signals including pause_count into qaTurnRepo
   assert.equal(turnRow.words_per_minute, 110);
   assert.equal(turnRow.pause_count, 3);
 });
+
+
+test('assigned knowledge freezes later main text, follow-up reference/rubric/source context and student privacy', async () => {
+  const world = buildWorld();
+  for (const q of world.db.questions.values()) { q.future_private_field = 'UNRELATED'; q.review_note = 'NOT SNAPSHOT CONTENT'; }
+  const view = await start(world);
+  const assigned = [...world.db.assigned.values()].filter(a => a.interview_id === view.interviewId).sort((a, b) => a.order_no - b.order_no);
+  const original = structuredClone(assigned[0].knowledge_snapshot);
+  assert.equal(Object.hasOwn(original, 'future_private_field'), false);
+  assert.equal(Object.hasOwn(original, 'review_note'), false);
+  assert.equal(Object.hasOwn(original, 'embedding'), false);
+  const nextText = assigned[1].knowledge_snapshot.content;
+  for (const question of world.db.questions.values()) {
+    question.content = 'MUTATED BANK TEXT'; question.reference_answer = 'MUTATED SECRET';
+    question.key_points = ['MUTATED POINT'];
+  }
+  world.db.rubrics.clear(); world.db.sourceRefs.clear();
+  world.db.questionRepository.findById = async () => { throw new Error('mutable question read'); };
+  world.db.rubricRepository.findById = async () => { throw new Error('mutable rubric read'); };
+  const follow = await answer(world, view, PARTIAL_ANSWER);
+  assert.equal(world.llm.calls[0].mainQuestion.referenceAnswer, original.reference_answer);
+  assert.deepEqual(world.llm.calls[0].mainQuestion.keyPoints, original.key_points);
+  assert.deepEqual(world.llm.calls[0].rubricCriteria, original.rubric_snapshot.criteria.map(c => c.criterion_name));
+  assert.equal(JSON.stringify(follow).includes('MUTATED SECRET'), false);
+  // Empty response skips any follow-up and advances to the original next main.
+  const next = await answer(world, follow, '');
+  assert.equal(next.currentTurn.questionText, nextText);
+  assertStudentSafeView(world, next);
+});
+
+test('legacy in-progress assignments continue frozen operational prompts without consulting mutable knowledge', async () => {
+  const world = buildWorld();
+  const view = await start(world);
+  const originalTurn = structuredClone(world.db.turnsOf(view.interviewId)[0]);
+  const assigned = [...world.db.assigned.values()].filter(a => a.interview_id === view.interviewId).sort((a, b) => a.order_no - b.order_no);
+  const nextText = assigned[1].knowledge_snapshot.content;
+  for (const row of assigned) {
+    row.legacy_question_text = row.knowledge_snapshot.content;
+    row.legacy_prompt_source = 'BANK_AT_MIGRATION';
+    row.knowledge_snapshot = null;
+  }
+  world.db.questionRepository.findById = async () => { throw new Error('mutable question read'); };
+  const next = await answer(world, view, PARTIAL_ANSWER);
+  assert.equal(world.llm.calls.length, 0);
+  assert.equal(next.currentTurn.questionText, nextText);
+  assert.equal(world.db.turnsOf(view.interviewId)[0].question_text, originalTurn.question_text);
+});

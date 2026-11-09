@@ -62,6 +62,9 @@ export function formatDate(value, options = {}) {
 }
 
 const errorKeys = {
+  REVISION_CONFLICT: 'This revision changed. Close and reopen the editor before reviewing it again.',
+  QUESTION_REVISION_REQUIRED: 'Edits are saved as a pending revision. The active approved question remains available until you publish. Changes to topics and purpose require a separate question.',
+  QUESTION_INCOMPLETE: 'A reference answer, key points and rubric are required before approval.',
   EMAIL_TAKEN: 'That email is already in use.', CODE_TAKEN: 'That code is already in use.',
   INVALID_CREDENTIALS: 'Invalid email/code or password.', ACCOUNT_LOCKED: 'Your account is temporarily locked. Please try again later.',
   MATERIAL_IN_USE: 'This material is cited by existing questions and cannot be deleted.',

@@ -70,8 +70,10 @@ function toApiQuestion(row) {
 class QuestionService {
   constructor({
     repository, embeddingAdapter, rubricRepository, topicRepository,
-    db, questionSourceRefRepository, subjectScope,
+    db, questionSourceRefRepository, subjectScope, realtimeBus = null, logger = console,
   } = {}) {
+    this.realtimeBus = realtimeBus;
+    this.logger = logger;
     this.repository = repository;
     this.embeddingAdapter = embeddingAdapter;
     this.rubricRepository = rubricRepository;
@@ -79,6 +81,24 @@ class QuestionService {
     this.db = db;
     this.questionSourceRefRepository = questionSourceRefRepository;
     this.subjectScope = subjectScope;
+  }
+
+  // Invalidation only (ids + status), called AFTER the write committed. A
+  // failure here must never fail the write.
+  async _publishQuestion(row, action, topicIdOverride = null) {
+    if (!this.realtimeBus || typeof this.realtimeBus.publish !== 'function') return;
+    try {
+      const topicId = row?.topic_id ?? topicIdOverride;
+      this.realtimeBus.publish('question', {
+        action,
+        questionId: row?.question_id ?? null,
+        topicId,
+        subjectId: await this._subjectOfTopic(topicId),
+        status: row?.status,
+      });
+    } catch (err) {
+      this.logger?.warn?.({ err }, 'question realtime publish failed');
+    }
   }
 
   // --- Subject scope -------------------------------------------------------
@@ -165,6 +185,7 @@ class QuestionService {
       createdBy: validated.createdBy,
     });
 
+    await this._publishQuestion(row, 'created');
     return { question: toApiQuestion(row), warnings };
   }
 
@@ -175,6 +196,23 @@ class QuestionService {
     }
     const scope = this._scopeFor(user);
     await this._assertTopicAccess(user, existing.topic_id, scope);
+
+    // Approved knowledge is the active exam-bank version. Editing it in place
+    // would also change what scheduled exams and grading read. A separate
+    // revision/publish workflow is required before these edits can be accepted.
+    if (existing.status === 'APPROVED') {
+      const protectedFields = [
+        'topicId', 'rubricId', 'content', 'bloomLevel', 'language',
+        'referenceAnswer', 'keyPoints', 'source', 'purpose',
+      ];
+      if (protectedFields.some((field) => payload?.[field] !== undefined)
+        || (payload?.status !== undefined && payload.status !== 'APPROVED')) {
+        const err = new Error('Approved question content requires a separate revision before it can be changed.');
+        err.statusCode = 409;
+        err.code = 'QUESTION_REVISION_REQUIRED';
+        throw err;
+      }
+    }
 
     const validated = this._validateUpdatePayload(payload);
     if (validated.patch.topicId !== undefined) {
@@ -219,7 +257,134 @@ class QuestionService {
     if (!row) {
       throw this._notFound();
     }
+    await this._publishQuestion(row, 'updated');
     return toApiQuestion(row);
+  }
+
+  _revisionError(code, message) {
+    const err = new Error(message);
+    err.statusCode = 409;
+    err.code = code;
+    return err;
+  }
+
+  _assertRevisionActor(user) {
+    if (user?.role !== 'LECTURER') {
+      const err = new Error('Only a lecturer can review question revisions.');
+      err.statusCode = 403;
+      err.code = 'FORBIDDEN';
+      throw err;
+    }
+  }
+
+  _revisionView(row) {
+    if (!row) return null;
+    return {
+      id: row.question_revision_id, questionId: row.question_id,
+      baseVersion: row.base_version, version: row.version, status: row.status,
+      content: (() => {
+        const content = parseJsonColumn(row.content) || {};
+        return {
+          content: content.content ?? '', referenceAnswer: content.referenceAnswer ?? null,
+          keyPoints: Array.isArray(content.keyPoints) ? content.keyPoints : [],
+          rubricId: content.rubricId ?? null, bloomLevel: content.bloomLevel ?? null,
+          language: content.language ?? null,
+        };
+      })(),
+    };
+  }
+
+  async getPendingRevision(questionId, user) {
+    this._assertRevisionActor(user);
+    const active = await this.repository.findById(questionId);
+    if (!active) throw this._notFound();
+    await this._assertTopicAccess(user, active.topic_id);
+    return this._revisionView(await this.repository.findPendingRevision(questionId));
+  }
+
+  async saveRevision(questionId, { patch, expectedVersion, revisionId } = {}, user) {
+    this._assertRevisionActor(user);
+    if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+      throw validationError('expectedVersion must be 0 for a new revision or the current revision version.');
+    }
+    if (expectedVersion > 0 && (!Number.isInteger(revisionId) || revisionId < 1)) {
+      throw validationError('revisionId is required when updating a revision.');
+    }
+    const allowed = ['content', 'referenceAnswer', 'keyPoints', 'rubricId', 'bloomLevel', 'language'];
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)
+      || Object.keys(patch).length === 0 || Object.keys(patch).some((key) => !allowed.includes(key))) {
+      throw validationError('A revision patch must contain only editable grading fields.');
+    }
+    if (patch.keyPoints !== undefined && patch.keyPoints !== null
+      && (!Array.isArray(patch.keyPoints) || patch.keyPoints.some((point) => typeof point !== 'string'))) {
+      throw validationError('Revision keyPoints must contain strings.');
+    }
+    const validated = this._validateUpdatePayload(patch).patch;
+    return this.db.withTransaction(async (client) => {
+      const active = await this.repository.findByIdForUpdate(questionId, client);
+      if (!active) throw this._notFound();
+      await this._assertTopicAccess(user, active.topic_id);
+      if (active.status !== 'APPROVED') throw this._revisionError('INVALID_TRANSITION', 'Only approved questions have revisions.');
+      const pending = await this.repository.findPendingRevision(questionId, client);
+      if ((pending?.version ?? 0) !== expectedVersion
+        || (pending && pending.question_revision_id !== revisionId)) {
+        throw this._revisionError('REVISION_CONFLICT', 'The pending revision changed; reload it before saving.');
+      }
+      if (pending && pending.base_version !== active.content_version) {
+        throw this._revisionError('REVISION_CONFLICT', 'The approved version changed; this revision is stale.');
+      }
+      const original = {
+        content: active.content, referenceAnswer: active.reference_answer,
+        keyPoints: parseJsonColumn(active.key_points), rubricId: active.rubric_id,
+        bloomLevel: active.bloom_level, language: active.language,
+      };
+      const content = { ...(pending ? parseJsonColumn(pending.content) : original), ...validated };
+      content.language = normalizeQuestionLanguage(content.language, content.content);
+      if (content.rubricId != null) await this._assertRubricMatchesTopic(content.rubricId, active.topic_id);
+      const revision = await this.repository.savePendingRevision(questionId, {
+        baseVersion: active.content_version, content, actorId: user.id, revision: pending,
+      }, client);
+      if (!revision) throw this._revisionError('REVISION_CONFLICT', 'The pending revision changed.');
+      return { revision: this._revisionView(revision), topicId: active.topic_id, questionId: active.question_id };
+    }).then(async ({ revision, topicId, questionId: qid }) => {
+      await this._publishQuestion({ question_id: qid ?? questionId, topic_id: topicId, status: 'APPROVED' }, 'status_changed');
+      return revision;
+    });
+  }
+
+  async publishRevision(questionId, { expectedVersion, revisionId } = {}, user) {
+    this._assertRevisionActor(user);
+    if (!Number.isInteger(expectedVersion) || expectedVersion < 1) throw validationError('expectedVersion must be a positive integer.');
+    if (!Number.isInteger(revisionId) || revisionId < 1) throw validationError('revisionId must be a positive integer.');
+    return this.db.withTransaction(async (client) => {
+      const active = await this.repository.findByIdForUpdate(questionId, client);
+      if (!active) throw this._notFound();
+      await this._assertTopicAccess(user, active.topic_id);
+      const revision = await this.repository.findPendingRevision(questionId, client);
+      if (active.status !== 'APPROVED' || !revision || revision.version !== expectedVersion
+        || revision.question_revision_id !== revisionId
+        || revision.base_version !== active.content_version) {
+        throw this._revisionError('REVISION_CONFLICT', 'The question or revision changed; reload before publishing.');
+      }
+      const content = parseJsonColumn(revision.content);
+      this._assertKnowledgeComplete({
+        reference_answer: content?.referenceAnswer, key_points: content?.keyPoints, rubric_id: content?.rubricId,
+      });
+      const patch = this._validateUpdatePayload(content).patch;
+      await this._assertRubricMatchesTopic(patch.rubricId, active.topic_id);
+      await this._assertNotDuplicate(patch.content, questionId);
+      // Clear stale embedding so duplicate scans never use the previous text.
+      const row = await this.repository.update(questionId, {
+        ...patch, embedding: null, reviewedBy: user.id, reviewedAt: new Date(), reviewNote: null,
+      }, client);
+      if (!row || !await this.repository.markRevisionPublished(revision.question_revision_id, user.id, client)) {
+        throw this._revisionError('REVISION_CONFLICT', 'The revision could not be published.');
+      }
+      return { question: toApiQuestion(row), revision: this._revisionView({ ...revision, status: 'PUBLISHED' }), row };
+    }).then(async ({ row, ...out }) => {
+      await this._publishQuestion(row, 'updated');
+      return out;
+    });
   }
 
   async deleteQuestion(questionId, user) {
@@ -232,6 +397,7 @@ class QuestionService {
     if (!row) {
       throw this._notFound();
     }
+    await this._publishQuestion({ ...existing, ...row }, 'deleted');
     return toApiQuestion(row);
   }
 
@@ -248,12 +414,15 @@ class QuestionService {
       err.code = 'RUBRIC_REQUIRED';
       throw err;
     }
+    await this._assertRubricMatchesTopic(existing.rubric_id, existing.topic_id);
+    this._assertKnowledgeComplete(existing);
     const row = await this.repository.updateStatusFields(questionId, {
       status: 'APPROVED',
       reviewedBy: reviewedBy ?? null,
       reviewedAt: new Date(),
       reviewNote: null,
     });
+    await this._publishQuestion(row, 'status_changed');
     return toApiQuestion(row);
   }
 
@@ -275,6 +444,7 @@ class QuestionService {
       reviewedAt: new Date(),
       reviewNote: trimmedReason,
     });
+    await this._publishQuestion(row, 'status_changed');
     return toApiQuestion(row);
   }
 
@@ -286,6 +456,7 @@ class QuestionService {
     const row = await this.repository.updateStatusFields(questionId, {
       status: 'ARCHIVED',
     });
+    await this._publishQuestion(row, 'status_changed');
     return toApiQuestion(row);
   }
 
@@ -356,6 +527,9 @@ class QuestionService {
       }
       // eslint-disable-next-line no-await-in-loop
       await this._assertRubricInSubject(existing, rubric, id);
+      // The shared rubric is what approval attaches; the knowledge check only
+      // validates the reference answer and key points on the row itself.
+      this._assertKnowledgeComplete({ ...existing, rubric_id: parsedRubricId }, id);
       existingRows.push(existing);
     }
 
@@ -378,11 +552,18 @@ class QuestionService {
       return approved;
     };
 
+    let approvedRows;
     if (this.db && typeof this.db.withTransaction === 'function') {
-      return this.db.withTransaction((tx) => run(tx));
+      approvedRows = await this.db.withTransaction((tx) => run(tx));
+    } else {
+      // No transactional db wired (unit fakes): fall back to the repo defaults.
+      approvedRows = await run(this.repository.db || undefined);
     }
-    // No transactional db wired (unit fakes): fall back to the repo defaults.
-    return run(this.repository.db || undefined);
+    for (const topicId of new Set(existingRows.map((r) => r.topic_id))) {
+      // eslint-disable-next-line no-await-in-loop
+      await this._publishQuestion(null, 'status_changed', topicId);
+    }
+    return approvedRows;
   }
 
   // Return the source citations (material chunks) backing a question so the
@@ -446,8 +627,9 @@ class QuestionService {
    * language / reference answer / key points (|-separated) / rubric code and
    * validate the WHOLE file before writing anything. On any invalid row it
    * returns { ok:false, errors:[{row, errors:[...]}] } with ZERO writes.
-   * Otherwise every row is inserted with source='IMPORT' status='APPROVED' and
-   * it returns { ok:true, created:[...] }. Mirrors adminService.importStudents.
+   * Otherwise every row is inserted with source='IMPORT' status='PENDING_REVIEW'
+   * (a lecturer must explicitly approve) and it returns { ok:true, created:[...] }.
+   * Mirrors adminService.importStudents.
    */
   async importQuestions(buffer, user) {
     let rows;
@@ -553,7 +735,7 @@ class QuestionService {
         topicId: info.topicId,
         rubricId: info.rubricId,
         content: entry.content,
-        status: 'APPROVED',
+        status: 'PENDING_REVIEW',
         bloomLevel: info.bloomLevel,
         language: normalizeQuestionLanguage(entry.language, entry.content),
         referenceAnswer: entry.referenceAnswer || null,
@@ -563,6 +745,10 @@ class QuestionService {
         createdBy: user ? user.id : null,
       });
       created.push(toApiQuestion(row));
+    }
+    for (const topicId of new Set(created.map((q) => q.topicId))) {
+      // eslint-disable-next-line no-await-in-loop
+      await this._publishQuestion(null, 'created', topicId);
     }
     return { ok: true, created };
   }
@@ -656,6 +842,37 @@ class QuestionService {
 
   // --- Internals -----------------------------------------------------------
 
+  // A question can only be approved once its grading knowledge base is
+  // complete: a non-blank reference answer, at least one non-empty key point,
+  // and an attached rubric. key_points may arrive as a JSON string (Postgres)
+  // or as a JS array (mock repos / unit fakes).
+  _missingKnowledgeFields(row) {
+    const missing = [];
+    const referenceAnswer = typeof row.reference_answer === 'string'
+      ? row.reference_answer.trim()
+      : '';
+    if (!referenceAnswer) missing.push('referenceAnswer');
+    const keyPoints = parseJsonColumn(row.key_points);
+    const usableKeyPoints = Array.isArray(keyPoints)
+      ? keyPoints.filter((point) => typeof point === 'string' && point.trim() !== '')
+      : [];
+    if (usableKeyPoints.length === 0) missing.push('keyPoints');
+    if (row.rubric_id == null) missing.push('rubricId');
+    return missing;
+  }
+
+  _assertKnowledgeComplete(row, questionId = null) {
+    const missing = this._missingKnowledgeFields(row);
+    if (missing.length === 0) return;
+    const err = new Error(
+      `A question needs a complete grading knowledge base before approval: missing ${missing.join(', ')}.`,
+    );
+    err.statusCode = 409;
+    err.code = 'QUESTION_INCOMPLETE';
+    if (questionId != null) err.questionId = questionId;
+    throw err;
+  }
+
   _notFound() {
     const err = new Error('Question not found');
     err.statusCode = 404;
@@ -728,8 +945,8 @@ class QuestionService {
     };
   }
 
-  // Default status APPROVED when content + topic + rubric are all present,
-  // otherwise DRAFT. An explicit, valid status in the payload wins.
+  // Default status PENDING_REVIEW when content + topic + rubric are all
+  // present, otherwise DRAFT. An explicit, valid status in the payload wins.
   _resolveCreateStatus(payload, { content, rubricId }) {
     if (payload?.status !== undefined && payload.status !== null && String(payload.status).trim() !== '') {
       const status = String(payload.status).trim();
@@ -744,7 +961,10 @@ class QuestionService {
       return status;
     }
     const complete = content && payload?.topicId != null && rubricId != null;
-    return complete ? 'APPROVED' : 'DRAFT';
+    // A question is never auto-approved: a complete manual draft goes to
+    // PENDING_REVIEW so a lecturer must explicitly review it (reference answer,
+    // key points and rubric) before it can enter an exam.
+    return complete ? 'PENDING_REVIEW' : 'DRAFT';
   }
 
   _validateUpdatePayload(payload) {

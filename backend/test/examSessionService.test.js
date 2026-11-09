@@ -248,6 +248,7 @@ function makeService(overrides = {}) {
     questionRepository,
     ttsAdapter,
     examLaunchService: overrides.examLaunchService,
+    realtimeBus: overrides.realtimeBus,
     db: null,
     clock,
     logger: overrides.logger || { info() {}, warn() {}, error() {} },
@@ -268,6 +269,23 @@ async function seedDraft(service, repo, over = {}) {
     ...over,
   });
 }
+
+test('exam changes publish only after successful repository writes', async () => {
+  const events = [];
+  const world = makeService({ realtimeBus: { publish: (entity, payload) => events.push({ entity, ...payload }) } });
+  const row = await seedDraft(world.service);
+  assert.deepEqual(events, [{
+    entity: 'exam', action: 'created', subjectId: SUBJECT_ID,
+    examSessionId: row.exam_session_id, status: 'DRAFT',
+  }]);
+  await assert.rejects(
+    world.service.scheduleSession({ user: lecturer, examSessionId: row.exam_session_id }),
+    { code: 'VALIDATION_ERROR' },
+  );
+  assert.equal(events.length, 1);
+  await world.service.updateSession({ user: lecturer, examSessionId: row.exam_session_id, title: 'Updated' });
+  assert.equal(events.at(-1).action, 'updated');
+});
 
 // --- CRUD + config/language validation ---------------------------------------
 

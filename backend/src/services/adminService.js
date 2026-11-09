@@ -50,11 +50,13 @@ class AdminService {
     passwordTokenRepository,
     backgroundJobRepository,
     authSessionRepository,
+    realtimeBus,
     env,
     clock,
   }) {
     this.appUserRepository = appUserRepository;
     this.authSessionRepository = authSessionRepository;
+    this.realtimeBus = realtimeBus;
     this.subjectRepository = subjectRepository;
     this.passwordTokenRepository = passwordTokenRepository;
     this.backgroundJobRepository = backgroundJobRepository;
@@ -64,6 +66,28 @@ class AdminService {
 
   _now() {
     return this.clock();
+  }
+
+  _publishAdminEntity(entity, action, ids = {}) {
+    this.realtimeBus?.publish(entity, { action, ...ids });
+  }
+
+  async _subjectRecipientIds(subjectId) {
+    if (typeof this.subjectRepository.listLecturers !== 'function'
+      || typeof this.subjectRepository.listStudents !== 'function') return [];
+    const [lecturers, students] = await Promise.all([
+      this.subjectRepository.listLecturers(subjectId),
+      this.subjectRepository.listStudents(subjectId),
+    ]);
+    return [...new Set([...lecturers, ...students].map((user) => Number(user.app_user_id)).filter(Number.isSafeInteger))];
+  }
+
+  _publishSubject(action, subjectId, recipientUserIds = []) {
+    this.realtimeBus?.publish('subject', {
+      action,
+      subjectId: Number(subjectId),
+      recipientUserIds: [...new Set(recipientUserIds.map(Number).filter(Number.isSafeInteger))],
+    });
   }
 
   // --- Users ---------------------------------------------------------------
@@ -169,6 +193,7 @@ class AdminService {
       role,
       status: 'ACTIVE',
     });
+    this._publishAdminEntity('user', 'created', { userId: Number(user.app_user_id) });
     await this._enqueueSetupEmail(user);
     return toSafeUser(user);
   }
@@ -217,6 +242,7 @@ class AdminService {
     if (roleChanged && typeof this.appUserRepository.clearSubjectAssignments === 'function') {
       await this.appUserRepository.clearSubjectAssignments(id);
     }
+    this._publishAdminEntity('user', 'updated', { userId: Number(id) });
     return toSafeUser(updated);
   }
 
@@ -235,6 +261,7 @@ class AdminService {
     if (typeof this.appUserRepository.clearSubjectAssignments === 'function') {
       await this.appUserRepository.clearSubjectAssignments(id);
     }
+    this._publishAdminEntity('user', 'deleted', { userId: Number(id) });
     return toSafeUser(updated);
   }
 
@@ -242,6 +269,7 @@ class AdminService {
     const user = await this.appUserRepository.findById(id);
     if (!user) throw adminError(404, 'NOT_FOUND', 'User not found.');
     const updated = await this.appUserRepository.update(id, { status: 'LOCKED' });
+    this._publishAdminEntity('user', 'updated', { userId: Number(id) });
     return toSafeUser(updated);
   }
 
@@ -253,6 +281,7 @@ class AdminService {
       locked_until: null,
       failed_login_count: 0,
     });
+    this._publishAdminEntity('user', 'updated', { userId: Number(id) });
     return toSafeUser(updated);
   }
 
@@ -380,6 +409,7 @@ class AdminService {
         status: 'ACTIVE',
       });
       await this._enqueueSetupEmail(user);
+      this._publishAdminEntity('user', 'created', { userId: Number(user.app_user_id) });
       created.push(toSafeUser(user));
     }
     return { ok: true, created };
@@ -452,6 +482,7 @@ class AdminService {
     }
     await this._assertSubjectCodeFree(trimmedCode);
     const subject = await this.subjectRepository.create({ code: trimmedCode, name: trimmedName });
+    this._publishSubject('created', subject.subject_id);
     return toSubject(subject);
   }
 
@@ -478,6 +509,7 @@ class AdminService {
     }
     if (allowed.code !== undefined) await this._assertSubjectCodeFree(allowed.code, id);
     const updated = await this.subjectRepository.update(id, allowed);
+    this._publishSubject('updated', id, await this._subjectRecipientIds(id));
     return toSubject(updated);
   }
 
@@ -486,6 +518,7 @@ class AdminService {
   async deleteSubject(id) {
     const subject = await this.subjectRepository.findById(id);
     if (!subject) throw adminError(404, 'NOT_FOUND', 'Subject not found.');
+    const recipients = await this._subjectRecipientIds(id);
     if (typeof this.subjectRepository.countDependents === 'function') {
       const counts = await this.subjectRepository.countDependents(id);
       if (Object.values(counts || {}).some((n) => Number(n) > 0)) {
@@ -495,21 +528,27 @@ class AdminService {
       }
     }
     await this.subjectRepository.remove(id);
+    this._publishSubject('deleted', id, recipients);
     return { ok: true };
   }
 
   async setSubjectArchived(id, archived) {
     const subject = await this.subjectRepository.findById(id);
     if (!subject) throw adminError(404, 'NOT_FOUND', 'Subject not found.');
+    const recipients = await this._subjectRecipientIds(id);
     const updated = await this.subjectRepository.setStatus(id, archived ? 'ARCHIVED' : 'ACTIVE');
+    this._publishSubject('updated', id, recipients);
     return toSubject(updated);
   }
 
   async assignLecturers(subjectId, lecturerIds) {
     const subject = await this.subjectRepository.findById(subjectId);
     if (!subject) throw adminError(404, 'NOT_FOUND', 'Subject not found.');
+    const previousRecipients = await this._subjectRecipientIds(subjectId);
     const ids = Array.isArray(lecturerIds) ? lecturerIds.map(Number).filter(Number.isInteger) : [];
     const assigned = await this.subjectRepository.setLecturers(subjectId, ids);
+    const currentRecipients = await this._subjectRecipientIds(subjectId);
+    this._publishSubject('updated', subjectId, [...previousRecipients, ...currentRecipients]);
     return { subjectId, lecturerIds: assigned };
   }
 
@@ -537,6 +576,7 @@ class AdminService {
   async assignStudents(subjectId, { codes, studentIds } = {}) {
     const subject = await this.subjectRepository.findById(subjectId);
     if (!subject) throw adminError(404, 'NOT_FOUND', 'Subject not found.');
+    const previousRecipients = await this._subjectRecipientIds(subjectId);
 
     if (codes === undefined && studentIds === undefined) {
       throw adminError(400, 'VALIDATION_ERROR', 'Either studentIds array or codes must be provided.');
@@ -571,6 +611,8 @@ class AdminService {
         subjectId,
         resolved.map((r) => r.app_user_id),
       );
+      const currentRecipients = await this._subjectRecipientIds(subjectId);
+      this._publishSubject('updated', subjectId, [...previousRecipients, ...currentRecipients]);
       return {
         ok: true,
         subjectId,
@@ -600,6 +642,8 @@ class AdminService {
       return { ok: false, errors };
     }
     const assigned = await this.subjectRepository.setStudents(subjectId, ids);
+    const currentRecipients = await this._subjectRecipientIds(subjectId);
+    this._publishSubject('updated', subjectId, [...previousRecipients, ...currentRecipients]);
     return {
       ok: true,
       subjectId,

@@ -1,6 +1,6 @@
 import { t, useLocale, formatNumber } from '../../i18n/index';
 import { useState, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, Calendar, CheckCircle2, FileQuestion } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { Button } from '../../components/ui/Button';
@@ -8,6 +8,8 @@ import { Card, CardHeader, CardBody } from '../../components/ui/Card';
 import { Badge } from '../../components/ui/Badge';
 import { LoadingSpinner } from '../../components/ui/Loading';
 import { getMyResult } from '../../services/studentApi';
+import { listMyExamSessions } from '../../services/studentExamApi';
+import TranscriptHistory from '../../components/interview/TranscriptHistory';
 import { formatDateTime } from '../../shared/utils/formatDate';
 import { ErrorPage } from '../../shared/components/ErrorPage';
 import { httpStatusOf } from '../../shared/utils/httpStatus';
@@ -16,9 +18,15 @@ export default function StudentResultDetail() {
   useLocale();
   const { id } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
   const [detail, setDetail] = useState(null);
+  const [fetchedInterviewId, setFetchedInterviewId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+
+  const directId = detail?.interviewId || detail?.interview_id || location.state?.interviewId || searchParams.get('interviewId') || null;
+  const interviewId = directId ? Number(directId) : fetchedInterviewId;
 
   useEffect(() => {
     let cancelled = false;
@@ -38,6 +46,20 @@ export default function StudentResultDetail() {
       cancelled = true;
     };
   }, [id]);
+
+  useEffect(() => {
+    if (!detail || directId) return;
+    if (detail.examSessionId) {
+      listMyExamSessions()
+        .then((sessions) => {
+          const match = Array.isArray(sessions) && sessions.find((s) => s.examSessionId === detail.examSessionId);
+          if (match?.interview?.interviewId) {
+            setFetchedInterviewId(Number(match.interview.interviewId));
+          }
+        })
+        .catch(() => {});
+    }
+  }, [detail, directId]);
 
   const getScoreBadgeType = (score) => {
     if (score >= 8.5) return 'success';
@@ -195,6 +217,13 @@ export default function StudentResultDetail() {
           );
         })}
       </div>
+
+      {/* Read-only Transcript History */}
+      {interviewId && (
+        <div style={{ marginTop: '2rem' }}>
+          <TranscriptHistory interviewId={interviewId} />
+        </div>
+      )}
     </div>
   );
 }

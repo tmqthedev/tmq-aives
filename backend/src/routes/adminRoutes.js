@@ -43,6 +43,7 @@ function createAdminRouter(controller, { requireAuth, requireRole }) {
   // Exam schedule (Step 12): list, start (SCHEDULED -> OPEN + warm-up), close,
   // manual re-warm.
   router.get('/exam-schedule', controller.listExamSchedule.bind(controller));
+  router.get('/exam-monitoring', controller.getExamMonitoring.bind(controller));
   router.get('/audit-log', controller.listAuditLog.bind(controller));
   router.post('/exam-sessions', controller.createExamSession.bind(controller));
   router.put('/exam-sessions/:id', controller.updateExamSession.bind(controller));
