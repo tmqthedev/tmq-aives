@@ -693,6 +693,10 @@ class InterviewService {
       answer_audio_key: answerAudioKey,
       transcript_confidence: clampConfidence(stt && stt.confidence),
       answer_ended_at: receivedAt,
+      // Restart the claim clock: the decision phase (follow-up LLM + TTS)
+      // starts now, and read-path recovery must measure its staleness from
+      // here, not from receivedAt (STT alone can take minutes).
+      processing_started_at: this.clock(),
       timed_out: timedOutFinal,
       response_latency_ms: signals?.responseLatencyMs ?? signals?.response_latency_ms,
       speech_duration_ms: signals?.speechDurationMs ?? signals?.speech_duration_ms,
@@ -1058,7 +1062,7 @@ class InterviewService {
     // submitAnswer persists ANSWERED, then spends seconds on the follow-up
     // decision before inserting the next turn. Advancing during that window
     // would replace a follow-up with the next main question.
-    if (!this._isStaleSince(latest.answer_ended_at)) return interview;
+    if (!this._isStaleSince(latest.processing_started_at || latest.answer_ended_at)) return interview;
     if (this._deadlinePassed(interview.deadline_at)) {
       return this._enforceDeadline(interview);
     }

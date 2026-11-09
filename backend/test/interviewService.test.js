@@ -1299,7 +1299,13 @@ test('ANSWERED without a next turn: getCurrentState creates exactly one next que
   assert.equal(turns(world, view).length, 1);
   assert.equal(fresh.currentTurn?.status === 'ASKED', false);
 
+  // Slow STT made the answer old, but the decision phase only just began
+  // (processing_started_at is reset on ANSWERED): still not abandoned.
   persisted[0].answer_ended_at = new Date(0);
+  await world.service.getCurrentState({ user: STUDENT, interviewId: view.interviewId });
+  assert.equal(turns(world, view).length, 1);
+
+  persisted[0].processing_started_at = new Date(0);
   const first = assertStudentSafeView(world, await world.service.getCurrentState({
     user: STUDENT, interviewId: view.interviewId,
   }));
