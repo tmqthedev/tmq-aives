@@ -1,5 +1,5 @@
 import { t, useLocale, formatNumber } from '../../i18n/index';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, Calendar, CheckCircle2, FileQuestion } from 'lucide-react';
 import { motion } from 'framer-motion';
@@ -9,6 +9,7 @@ import { Badge } from '../../components/ui/Badge';
 import { LoadingSpinner } from '../../components/ui/Loading';
 import { getMyResult } from '../../services/studentApi';
 import { listMyExamSessions } from '../../services/studentExamApi';
+import { useBusinessEvents } from '../../hooks/useBusinessEvents';
 import TranscriptHistory from '../../components/interview/TranscriptHistory';
 import { formatDateTime } from '../../shared/utils/formatDate';
 import { ErrorPage } from '../../shared/components/ErrorPage';
@@ -28,24 +29,56 @@ export default function StudentResultDetail() {
   const directId = detail?.interviewId || detail?.interview_id || location.state?.interviewId || searchParams.get('interviewId') || null;
   const interviewId = directId ? Number(directId) : fetchedInterviewId;
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        setLoading(true);
+  // Latest request wins when the route id changes or a live refresh overlaps
+  // the initial load.
+  const requestSeq = useRef(0);
+  const fetchResult = useCallback(async ({ silent = false } = {}) => {
+    const seq = ++requestSeq.current;
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+    }
+    try {
+      const data = await getMyResult(id);
+      if (seq === requestSeq.current) {
+        setDetail(data);
         setError(null);
-        const data = await getMyResult(id);
-        if (!cancelled) setDetail(data);
-      } catch (err) {
-        if (!cancelled) setError(err);
-      } finally {
-        if (!cancelled) setLoading(false);
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    } catch (err) {
+      // A failed live refresh keeps the previously loaded result on screen.
+      if (seq === requestSeq.current && !silent) setError(err);
+    } finally {
+      if (seq === requestSeq.current && !silent) setLoading(false);
+    }
   }, [id]);
+
+  useEffect(() => { fetchResult(); }, [fetchResult]);
+
+  // This result being (re)graded or finalized elsewhere refreshes the page.
+  // Reconnects fire with no event; bursts collapse into one refetch per ~500ms.
+  const refreshTimer = useRef(null);
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimer.current) return;
+    refreshTimer.current = setTimeout(() => {
+      refreshTimer.current = null;
+      fetchResult({ silent: true });
+    }, 500);
+  }, [fetchResult]);
+
+  useEffect(() => () => {
+    if (refreshTimer.current) clearTimeout(refreshTimer.current);
+  }, []);
+
+  useBusinessEvents(['result'], (event) => {
+    if (!event) {
+      scheduleRefresh();
+      return;
+    }
+    if (event.action === 'finalized'
+      || (event.resultId != null && String(event.resultId) === String(id))) {
+      scheduleRefresh();
+    }
+  });
 
   useEffect(() => {
     if (!detail || directId) return;

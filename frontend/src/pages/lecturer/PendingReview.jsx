@@ -1,5 +1,5 @@
 import { t, useLocale, enumLabel, translateMessage } from '../../i18n/index';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import WorkflowNext from '../../shared/components/WorkflowNext';
 import {
   Inbox, ChevronDown, ChevronRight, Check, X, Edit2,
@@ -13,6 +13,7 @@ import {
   approveBatch,
 } from '../../services/reviewApi';
 import { listRubrics } from '../../services/rubricApi';
+import { useBusinessEvents } from '../../hooks/useBusinessEvents';
 
 export default function LecturerPendingReview() {
   useLocale();
@@ -56,6 +57,24 @@ export default function LecturerPendingReview() {
       }
     })();
   }, [load]);
+
+  // Refetch when questions change elsewhere (e.g. a generation job adds
+  // drafts). A burst of events collapses into one refetch every ~500ms, and
+  // only `questions` is replaced, so the open editor and selection survive.
+  const reloadTimer = useRef(null);
+  const scheduleReload = useCallback(() => {
+    if (reloadTimer.current) return;
+    reloadTimer.current = setTimeout(() => {
+      reloadTimer.current = null;
+      load();
+    }, 500);
+  }, [load]);
+
+  useEffect(() => () => {
+    if (reloadTimer.current) clearTimeout(reloadTimer.current);
+  }, []);
+
+  useBusinessEvents(['question'], () => { scheduleReload(); });
 
   const toggleExpand = async (id) => {
     if (expandedId === id) {
