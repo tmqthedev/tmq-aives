@@ -302,6 +302,10 @@ export default function StudentVivaSession() {
       try {
         const AudioCtx = window.AudioContext || window.webkitAudioContext;
         if (AudioCtx) {
+          // Browsers cap live AudioContexts; one per answer would exhaust them.
+          if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+            try { audioContextRef.current.close(); } catch { /* ignore */ }
+          }
           const ctx = new AudioCtx();
           audioContextRef.current = ctx;
           const source = ctx.createMediaStreamSource(stream);

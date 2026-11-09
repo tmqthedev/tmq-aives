@@ -1098,3 +1098,69 @@ test('legacy in-progress assignments continue frozen operational prompts without
   assert.equal(next.currentTurn.questionText, nextText);
   assert.equal(world.db.turnsOf(view.interviewId)[0].question_text, originalTurn.question_text);
 });
+
+// --- onTranscribed callback ---------------------------------------------------------------
+
+test('onTranscribed: called once with the persisted turn, before the LLM decision', async () => {
+  const order = [];
+  const world = buildWorld({
+    llmScript: [() => { order.push('llm'); return validAsk(); }],
+  });
+  const view = await start(world);
+  const payloads = [];
+
+  const after = await answer(world, view, PARTIAL_ANSWER, {
+    onTranscribed: (payload) => {
+      order.push('transcribed');
+      payloads.push(payload);
+    },
+  });
+
+  assert.equal(payloads.length, 1);
+  assert.deepEqual(payloads[0], {
+    interviewId: view.interviewId,
+    turnId: view.currentTurn.turnId,
+    sequenceNo: 1,
+    transcript: PARTIAL_ANSWER,
+  });
+  assert.deepEqual(order, ['transcribed', 'llm']);
+  assert.equal(after.currentTurn.turnType, 'FOLLOW_UP');
+});
+
+test('onTranscribed: still called once when the follow-up LLM throws on both attempts', async () => {
+  const world = buildWorld({ llmScript: [new Error('throttled'), new Error('throttled')] });
+  const view = await start(world);
+  const payloads = [];
+
+  const after = await answer(world, view, PARTIAL_ANSWER, {
+    onTranscribed: (payload) => payloads.push(payload),
+  });
+
+  assert.equal(world.llm.calls.length, 2);
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0].turnId, view.currentTurn.turnId);
+  assert.equal(payloads[0].transcript, PARTIAL_ANSWER);
+  assert.equal(after.currentTurn.turnType, 'MAIN');
+  assert.equal(failures(world, 'FOLLOW_UP_LLM').length, 1);
+});
+
+test('onTranscribed: not called when STT fails', async () => {
+  const world = buildWorld();
+  const view = await start(world);
+  await play(world, view);
+  world.stt.transcribe = async () => { throw new Error('stt down'); };
+  const payloads = [];
+
+  await expectError(
+    answer(world, view, undefined, {
+      transcript: undefined,
+      audio: Buffer.from(PARTIAL_ANSWER),
+      onTranscribed: (payload) => payloads.push(payload),
+    }),
+    502,
+    'STT_FAILED',
+  );
+
+  assert.deepEqual(payloads, []);
+  assert.equal(world.db.turns.get(view.currentTurn.turnId).status, 'ANSWERING');
+});

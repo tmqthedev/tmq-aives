@@ -202,7 +202,9 @@ function deliverInvalidation(event, sockets, {
 // Returns the wire payload for this socket, or null when it must not receive it.
 async function payloadFor(socket, event, safe, { examSessionRepository, subjectScope, appUserRepository }) {
   const { user } = socket;
-  if (user.role === 'ADMIN') return safe;
+  if (user.role === 'ADMIN') {
+    return await hasActiveRole(appUserRepository, user.id, 'ADMIN') ? safe : null;
+  }
   const isPerStudent = event.entity === 'interview' || event.entity === 'result';
 
   if (user.role === 'LECTURER') {

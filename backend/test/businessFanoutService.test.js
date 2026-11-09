@@ -22,7 +22,8 @@ function world() {
     deps: {
       logger: { warn() {} },
       appUserRepository: {
-        findById: async (id) => ({ app_user_id: id, status: 'ACTIVE', role: id >= 20 ? 'STUDENT' : 'LECTURER' }),
+        findById: async (id) => (id === 2 ? { app_user_id: id, status: 'DELETED', role: 'ADMIN' }
+          : { app_user_id: id, status: 'ACTIVE', role: id >= 20 ? 'STUDENT' : id === 1 ? 'ADMIN' : 'LECTURER' }),
       },
       examSessionRepository: {
         findById: async (id) => exams.get(Number(id)) || null,
@@ -119,4 +120,11 @@ test('students in an exam room do not receive other entity events', async () => 
     entity: 'exam', action: 'status_changed', examSessionId: 1, status: 'OPEN',
   }, [s], deps);
   assert.equal(s.sent.length, 1);
+});
+
+test('a deleted or demoted admin stops receiving on an open socket', async () => {
+  const { deps } = world();
+  const removed = fakeSocket('ADMIN', 2);
+  await deliverInvalidation(interviewEvent, [removed], deps);
+  assert.equal(removed.sent.length, 0);
 });

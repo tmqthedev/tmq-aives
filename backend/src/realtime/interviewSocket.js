@@ -219,25 +219,12 @@ function attachInterviewSocket(httpServer, {
           transcript: data.transcript,
           timedOut: data.timedOut === true,
           signals,
+          // Emitted as soon as the engine has persisted the answer text, before
+          // the follow-up LLM decision and next-turn TTS. Only on the success
+          // path (never while recording and never for an empty-audio retry).
+          // Goes to this student's socket only.
+          onTranscribed: (transcribedTurn) => socket.emit('turn:transcribed', transcribedTurn),
         });
-
-        // Emit the recognized answer text as soon as it is stored, before the
-        // next question, and only on the success path (never while recording
-        // and never for an empty-audio retry). Goes to this student's socket only.
-        const answered = !(view.currentTurn && view.currentTurn.status === 'ANSWERING');
-        if (answered) {
-          try {
-            const transcribedTurn = await interviewService.getTranscribedTurn({
-              user: socket.user,
-              interviewId,
-              turnId,
-            });
-            if (transcribedTurn) socket.emit('turn:transcribed', transcribedTurn);
-          } catch (err) {
-            // Non-fatal: the state already advanced; the client can fetch the
-            // transcript via GET /api/interviews/:id/transcript.
-          }
-        }
 
         socket.emit('interview:state', view);
 

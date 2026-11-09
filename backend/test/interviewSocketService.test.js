@@ -233,14 +233,15 @@ test('answer:end emits turn:transcribed to the answering student only', async ()
   };
   const transcribedPayload = { interviewId: 200, turnId: 601, sequenceNo: 1, transcript: 'Synthetic answer' };
 
+  let onTranscribedCalls = 0;
+
   const fakeInterviewService = {
     async getCurrentState() { return fakeState; },
-    async submitAnswer() { return answeredState; },
-    async getTranscribedTurn({ user, interviewId, turnId }) {
-      assert.equal(user.id, 10);
-      assert.equal(interviewId, 200);
-      assert.equal(turnId, 601);
-      return transcribedPayload;
+    async submitAnswer({ onTranscribed }) {
+      assert.equal(typeof onTranscribed, 'function');
+      onTranscribedCalls += 1;
+      onTranscribed(transcribedPayload);
+      return answeredState;
     },
   };
 
@@ -277,6 +278,7 @@ test('answer:end emits turn:transcribed to the answering student only', async ()
 
   assert.deepEqual(ownerEvents, [transcribedPayload]);
   assert.deepEqual(otherEvents, []);
+  assert.equal(onTranscribedCalls, 1, 'the engine callback is passed exactly once');
 
   owner.disconnect();
   other.disconnect();

@@ -474,7 +474,7 @@ class InterviewService {
   // a client transcript, or, when neither is given, the partial segments
   // collected so far. Then apply the decision order.
   async submitAnswer({
-    user, interviewId, turnId, audio, contentType, transcript, timedOut = false, signals,
+    user, interviewId, turnId, audio, contentType, transcript, timedOut = false, signals, onTranscribed,
   } = {}) {
     const { interview, exam } = await this._loadOwned(user, interviewId);
     // Already ended (e.g. lazily at the deadline): nothing is accepted.
@@ -642,7 +642,7 @@ class InterviewService {
     const timedOutFinal = timedOut === true
       || (answerDeadlineMs != null && receivedAt.getTime() >= answerDeadlineMs);
 
-    await this.qaTurnRepository.update(claimed.qa_turn_id, {
+    const answeredTurn = await this.qaTurnRepository.update(claimed.qa_turn_id, {
       status: 'ANSWERED',
       answer_text: answerText,
       answer_audio_key: answerAudioKey,
@@ -655,6 +655,24 @@ class InterviewService {
       pause_count: signals?.pause_count ?? signals?.pauseCount,
     });
     await this._safeContext(() => this.sessionContextStore.clearPartialSegments(id));
+
+    // Hand the recognized answer to the transport as soon as it is persisted,
+    // BEFORE the follow-up LLM decision and next-turn TTS. A slow or failing
+    // provider must never delay or suppress it, so the callback is optional and
+    // its failures are swallowed here.
+    if (typeof onTranscribed === 'function') {
+      const persisted = answeredTurn || claimed;
+      try {
+        onTranscribed({
+          interviewId: id,
+          turnId: persisted.qa_turn_id,
+          sequenceNo: persisted.sequence_no,
+          transcript: answeredTurn ? (answeredTurn.answer_text ?? null) : answerText,
+        });
+      } catch (err) {
+        this.logger.warn({ err, interviewId: id }, 'onTranscribed callback failed');
+      }
+    }
 
     // --- Decision ------------------------------------------------------------
     const followUpsUsed = Number(interview.current_follow_up_count) || 0;

@@ -20,7 +20,7 @@ async function setup() {
   const appUserRepository = {
     findById: async (id) => ({
       app_user_id: Number(id),
-      role: Number(id) === 20 ? 'STUDENT' : 'LECTURER',
+      role: Number(id) === 20 ? 'STUDENT' : Number(id) === 99 ? 'ADMIN' : 'LECTURER',
       status: 'ACTIVE',
     }),
   };
