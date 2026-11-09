@@ -32,6 +32,32 @@ function sampleRubricPayload(overrides = {}) {
   };
 }
 
+test('named rubric writes use bound SQL parameters', async () => {
+  const queries = [];
+  const tx = {
+    async query(sql, values = []) {
+      queries.push({ sql, values });
+      if (sql.includes('rubric_criterion')) return { rows: [] };
+      return { rows: [{ rubric_id: 7, max_score: 10, name: 'TEST_Rubric' }] };
+    },
+  };
+  const repository = new RubricRepository({
+    ...tx,
+    withTransaction: (work) => work(tx),
+  });
+
+  await repository._applyRubricMeta(tx, 7, { name: 'TEST_Rubric', subjectId: 3 });
+  assert.match(queries[0].sql, /name = \$1/);
+  assert.match(queries[0].sql, /subject_id = \$2/);
+  assert.deepEqual(queries[0].values, ['TEST_Rubric', 3, 7]);
+
+  queries.length = 0;
+  await repository.update(7, { maxScore: 10, name: 'TEST_Rubric' });
+  assert.match(queries[0].sql, /max_score = \$1/);
+  assert.match(queries[0].sql, /name = \$2/);
+  assert.deepEqual(queries[0].values, [10, 'TEST_Rubric', 7]);
+});
+
 test('creates and lists rubrics with criteria', async () => {
   const { rubricService } = createRubricService();
 

@@ -1,4 +1,13 @@
-import { psql, ssm } from './e2e-business-flows.mjs';
+import { execFileSync } from 'node:child_process';
+
+function ssm(command) {
+  return execFileSync('node', ['scripts/aws-ssm.js', command], { encoding: 'utf8' });
+}
+
+function psql(query) {
+  const sanitized = query.replace(/\n/g, ' ').replace(/"/g, '\\"');
+  return ssm(`docker exec aives-postgres psql -U aives -d aives -A -t -c "${sanitized}"`);
+}
 
 const apply = process.argv.includes('--apply');
 if (apply && process.env.E2E_CONFIRM_CLEANUP !== 'YES') {

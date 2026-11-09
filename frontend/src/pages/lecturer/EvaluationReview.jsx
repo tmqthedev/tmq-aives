@@ -741,8 +741,8 @@ export default function LecturerEvaluationReview() {
 
                           {/* Speech Signals Chips */}
                           <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
-                            {turn.speech_latency_ms != null && (
-                              <span style={{ fontSize: '0.7rem', backgroundColor: 'var(--surface-alt)', padding: '0.15rem 0.4rem', borderRadius: '4px', color: 'var(--text-muted)' }}>{t("Độ trễ:")} {turn.speech_latency_ms}ms
+                            {turn.response_latency_ms != null && (
+                              <span style={{ fontSize: '0.7rem', backgroundColor: 'var(--surface-alt)', padding: '0.15rem 0.4rem', borderRadius: '4px', color: 'var(--text-muted)' }}>{t("Độ trễ:")} {turn.response_latency_ms}ms
                               </span>
                             )}
                             {turn.speech_duration_ms != null && (

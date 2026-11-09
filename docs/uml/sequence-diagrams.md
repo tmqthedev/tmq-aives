@@ -2,7 +2,7 @@
 
 Tên lifeline là lớp/module thật trong repo; tên message là hàm, endpoint hoặc sự kiện Socket.IO thật. `alt` / `opt` / `loop` là combined fragment của UML.
 
-Nguồn: `frontend/src/pages/`, `frontend/src/contexts/AuthContext.jsx`, `backend/src/realtime/interviewSocket.js`, `backend/src/services/` (auth, admin, material, questionGeneration, question, examSession, examLaunch, interview, grading), `backend/src/jobs/`, `backend/src/server.js`.
+Nguồn: `frontend/src/pages/`, `frontend/src/components/exam/DeviceCheckModal.jsx`, `frontend/src/contexts/AuthContext.jsx`, `frontend/src/services/authApi.js`, `backend/src/realtime/interviewSocket.js`, `backend/src/services/` (auth, admin, material, questionGeneration, question, examSession, examLaunch, interview, grading), `backend/src/jobs/`, `backend/src/server.js`.
 
 ## 1. Bắt đầu hoặc tiếp tục phiên thi
 
@@ -18,7 +18,12 @@ sequenceDiagram
   participant S3 as S3 audio (tts-cache)
   participant SC as SessionContextStore (DynamoDB)
 
-  St->>UI: bấm vào thi (startOrResumeInterview)
+  St->>UI: bấm Bắt đầu / Tiếp tục thi
+  UI->>UI: DeviceCheckModal: getUserMedia, đo mức âm, phát âm thanh thử
+  alt chưa đạt hoặc huỷ
+    UI-->>St: giải thích lỗi micro / loa, chưa gọi API
+  end
+  St->>UI: Bắt đầu thi (micro đủ 600 ms tiếng nói, đã nghe âm thanh thử)
   UI->>API: POST /api/interviews {examSessionId}
   API->>IS: startOrResume(user, examSessionId, clientIp)
   IS->>DB: examSessionRepository.findById
@@ -51,10 +56,16 @@ sequenceDiagram
     IS-->>API: toStudentInterviewView + assertStudentSafe
   end
   API-->>UI: 200 {interview, currentTurn}
-  UI->>UI: chuyển tới /student/viva?interviewId=<id>
+  UI->>UI: markDeviceCheckPassed(id) (sessionStorage), chuyển tới /student/viva?interviewId=<id>
   UI->>API: Socket.IO interview:join
   API-->>UI: interview:state
-  UI->>API: interview:ready
+  alt tab đã qua kiểm tra thiết bị
+    UI->>API: interview:ready
+  else mở trực tiếp / tab khác
+    UI->>St: bước kiểm tra micro tại chỗ
+    St->>UI: bắt đầu
+    UI->>API: interview:ready
+  end
   API-->>UI: question:new (hoặc interview:completed)
 ```
 
@@ -153,14 +164,18 @@ sequenceDiagram
   GS->>DB: interview, assigned questions, qa_turn
   loop mỗi assigned question
     GS->>DB: rubric_criterion + performance_level
-    GS->>LLM: gradeQuestion(mainQuestion, history, rubricCriteria, language)
-    alt lỗi tạm thời
-      GS-->>H: throw
-      H-->>Q: throw → markFailed / backoff
-    else lỗi khác
-      GS->>GS: đánh giá rỗng + flag_reason
-    else thành công
-      GS->>GS: lọc criterion/level sai, calculateQuestionScore
+    alt isUnansweredQuestion(turns)
+      GS->>GS: noAnswerEvaluation: 0 điểm, model_id rule:no-answer (không gọi LLM)
+    else có nội dung trả lời
+      GS->>LLM: gradeQuestion(mainQuestion, history, rubricCriteria, language)
+      alt lỗi tạm thời
+        GS-->>H: throw
+        H-->>Q: throw → markFailed / backoff
+      else lỗi khác
+        GS->>GS: đánh giá rỗng + flag_reason
+      else thành công
+        GS->>GS: lọc criterion/level sai, calculateQuestionScore
+      end
     end
   end
   GS->>DB: saveEvaluationsAndCriteria
@@ -184,7 +199,7 @@ sequenceDiagram
 
 ## 4. Đăng nhập và làm mới phiên (refresh token xoay vòng)
 
-`AuthService.login` / `refresh` (`backend/src/services/authService.js`). Token nằm trong cookie httpOnly. SPA hiện chỉ gọi `/auth/me` khi tải trang; `postRefresh` có sẵn trong `authApi.js` nhưng chưa được gọi tự động.
+`AuthService.login` / `refresh` (`backend/src/services/authService.js`). Token nằm trong cookie httpOnly (access 15 phút, refresh 7 ngày). SPA gọi `/auth/me` khi tải trang và tự làm mới phiên qua `refreshSession` (`frontend/src/services/authApi.js`): khi một lời gọi API nhận `401` (`authedFetch`, trừ các endpoint login/refresh/logout/forgot/reset/set-password), mỗi 10 phút khi đã đăng nhập (`AuthContext`), và khi bắt tay Socket.IO phòng thi bị từ chối. Các `401` đồng thời dùng chung một lần refresh.
 
 ```mermaid
 sequenceDiagram
@@ -216,7 +231,7 @@ sequenceDiagram
     UI->>API: GET /api/auth/me
     API-->>UI: user (role → /admin, /lecturer, /student)
   end
-  Note over UI,API: Làm mới phiên
+  Note over UI,API: Làm mới phiên (authedFetch nhận 401, hoặc timer 10 phút)
   UI->>API: POST /api/auth/refresh (cookie refresh)
   API->>AS: refresh(refreshToken)
   AS->>TS: verify(type refresh)
@@ -229,6 +244,9 @@ sequenceDiagram
     AS->>TS: signAccess, signRefresh
     AS->>SR: create(phiên mới)
     API-->>UI: 200, Set-Cookie cặp token mới
+    opt refresh do 401
+      UI->>API: gửi lại yêu cầu ban đầu (một lần)
+    end
   end
 ```
 

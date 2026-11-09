@@ -128,6 +128,43 @@ function detectFlagReason({ questionEvaluations = [], turns = [], llmFailed = fa
   return { isFlagged: false, flagReason: null };
 }
 
+// Hesitation sounds and fillers that carry no answer content on their own.
+// Kept short and exact on purpose: an answer is "no answer" only when every
+// token is one of these, so a real (even very short) answer is never zeroed.
+const FILLER_TOKENS = new Set([
+  'a', 'à', 'á', 'ạ', 'ả', 'ã', 'ơ', 'ờ', 'ớ', 'ở', 'ợ', 'ư', 'ừ', 'ừm', 'ừa', 'ưm', 'um', 'umm',
+  'uh', 'uhm', 'uhh', 'ah', 'eh', 'er', 'erm', 'hm', 'hmm', 'hmmm', 'mm', 'mmm', 'ờm', 'ơm', 'ậm',
+]);
+
+/**
+ * True when the text holds actual answer content: at least one word that is
+ * not punctuation, a bracketed STT tag such as "[silence]", or a filler sound.
+ * @param {string|null|undefined} text
+ * @returns {boolean}
+ */
+function isSubstantiveAnswer(text) {
+  const cleaned = String(text ?? '')
+    .normalize('NFC')
+    .toLowerCase()
+    .replace(/\[[^\]]*\]|\([^)]*\)/g, ' ')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .trim();
+  if (!cleaned) return false;
+  return cleaned.split(/\s+/).some((token) => !FILLER_TOKENS.has(token));
+}
+
+/**
+ * True when the student said nothing usable for a main question across its
+ * main turn and all follow-ups (or was never asked it before the deadline).
+ * Such a question scores 0 without calling the LLM.
+ * @param {Array} turns - qa_turn rows of one assigned question
+ * @returns {boolean}
+ */
+function isUnansweredQuestion(turns = []) {
+  if (!Array.isArray(turns) || turns.length === 0) return true;
+  return !turns.some((t) => isSubstantiveAnswer(t && (t.answer_text ?? t.answerText)));
+}
+
 /**
  * Validates a lecturer score adjustment.
  * @param {Object} params
@@ -165,4 +202,6 @@ module.exports = {
   calculateVivaTotalScore,
   detectFlagReason,
   assertValidScoreAdjustment,
+  isSubstantiveAnswer,
+  isUnansweredQuestion,
 };

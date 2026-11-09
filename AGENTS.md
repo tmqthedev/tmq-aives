@@ -102,6 +102,7 @@ swd392_team7_product/
 - **Lint**: `npm run lint` (runs `oxlint`)
 - **Build**: `npm run build`
 - **Preview**: `npm run preview`
+- **Test**: `npm test` (`node:test` over `test/*.test.js`; pure modules only: `language.test.js`, `audioDevices.test.js`)
 
 ### Local Multi-Container Stack (Root)
 - **Start All**: `docker compose up` (or `-d` for daemon). Needs temporary AWS credentials in the shell for Bedrock; STT/TTS run locally as Lambda RIE containers.
@@ -157,7 +158,8 @@ Code MUST NOT branch on environment names (`process.env.NODE_ENV === 'local'`). 
 - Tokens: JWT Access and Refresh tokens stored in `httpOnly` secure cookies (`src/auth/`).
 - Roles: `ADMIN`, `LECTURER`, `STUDENT`.
 - Admin (Step 14): Add User by role, guarded role change and soft delete (`DELETED`), subject archive instead of delete, admin exam create/delete, and an IDs-only `admin_audit_log` written by `AdminController._audit`. Server-side user search via `GET /api/admin/users?q=&role=&status=&subjectId=&page=` and the shared `components/ui/UserPicker.jsx`. See the "Admin and audit" section of CLAUDE.md.
-- Frontend error text: map API `code` to a VI/EN message in `i18n/core.js` `errorMessage`; pages show `err.message`.
+- Frontend error text: map API `code` to a VI/EN message in `i18n/core.js` `errorMessage`; pages show `err.message`. Whole-page failures use `shared/components/ErrorPage` (per-HTTP-status pages, `ErrorBoundary`, `*` → 404, 403 for another role's area).
+- Session refresh: all frontend API calls go through `authedFetch` (`services/authApi.js`), which refreshes once on a `401` (one shared in-flight refresh) and retries; `AuthContext` also refreshes every 10 minutes while signed in. See CLAUDE.md.
 - Subject Scoping: Lecturers are restricted to subjects assigned to them. Enforced in services (`services/subjectScope.js`, plus the material, generation and grading services), not in route middleware.
 - CSRF Protection: `middleware/csrf.js` verifies incoming `Origin` against `APP_BASE_URL` on state-changing methods (`POST`, `PUT`, `PATCH`, `DELETE`).
 - Error Handling: Errors have `statusCode` and machine-readable `code`. Responses format as `{ message, code }`.
@@ -167,6 +169,8 @@ Code MUST NOT branch on environment names (`process.env.NODE_ENV === 'local'`). 
 - Transport: REST `/api/interviews` and Socket.IO namespace `/interview` (`src/realtime/interviewSocket.js`). The browser records with `MediaRecorder` (webm/opus, 1 s `audio:chunk`) and ends with `answer:end`.
 - Exam language (`VI` | `EN`) is derived from the topic's approved questions (`domain/questionLanguage.js`), never chosen in the UI; it drives STT, TTS, follow-ups and grading, independent of the UI language.
 - Closing an exam does not end running interviews; `EXPIRE_INTERVIEWS` does. `TERMINATED` is defined but never written.
+- Students pass `components/exam/DeviceCheckModal.jsx` (mic + speaker check) on the dashboard before `POST /api/interviews`; the exam room falls back to an inline mic check when opened directly.
+- Grading: a main question with no substantive answer in any of its turns (or never asked) scores 0 without an LLM call (`isUnansweredQuestion`, `model_id = 'rule:no-answer'`).
 - DynamoDB session store (`clients.sessionStore`): Tracks ephemeral turn state, deadlines, transcripts, and TTL (`expiresAt`). Rebuilt from Postgres if missing.
 - **Strict Decision Order After Answer**:
   1. Session deadline exceeded -> End interview.

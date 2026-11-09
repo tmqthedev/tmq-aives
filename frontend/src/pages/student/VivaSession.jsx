@@ -22,6 +22,7 @@ import { Feedback } from '../../components/ui/Feedback';
 import Modal from '../../components/Modal';
 import TranscriptHistory from '../../components/interview/TranscriptHistory';
 import { createInterviewSocket } from '../../services/interviewSocket';
+import { refreshSession } from '../../services/authApi';
 import {
   getAudioPrefs,
   saveAudioPrefs,
@@ -146,6 +147,7 @@ export default function StudentVivaSession() {
       cleanupMedia();
       if (socketRef.current) {
         socketRef.current.disconnect();
+        socketRef.current = null;
       }
     };
   }, [cleanupMedia]);
@@ -453,7 +455,11 @@ export default function StudentVivaSession() {
     const socket = createInterviewSocket();
     socketRef.current = socket;
 
+    // One silent refresh per connection attempt; reset once connected so a
+    // later reconnect gets its own refresh.
+    let refreshedForSocket = false;
     socket.on('connect', () => {
+      refreshedForSocket = false;
       loadTranscript();
 
       socket.emit('interview:join', { interviewId: Number(interviewIdParam) }, (res) => {
@@ -520,8 +526,21 @@ export default function StudentVivaSession() {
       });
     });
 
-    socket.on('connect_error', (err) => {
-      setErrorMessage(localizedErrorMessage({ code: err.code || err.message }));
+    // The handshake is authenticated with the 15-minute access cookie, so a
+    // reconnect late in an exam can fail on an expired token: refresh the
+    // session once and reconnect before showing the error.
+    socket.on('connect_error', async (err) => {
+      const code = err.code || err.message;
+      if (!refreshedForSocket && (code === 'AUTHENTICATION_REQUIRED' || code === 'INVALID_TOKEN')) {
+        refreshedForSocket = true;
+        const refreshed = await refreshSession();
+        if (socketRef.current !== socket) return; // the page was left meanwhile
+        if (refreshed) {
+          socket.connect();
+          return;
+        }
+      }
+      setErrorMessage(localizedErrorMessage({ code }));
       setPhase('ERROR');
     });
 

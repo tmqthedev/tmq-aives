@@ -1,5 +1,10 @@
 import { createContext, useContext, useEffect, useState, useCallback } from 'react';
-import { getMe, postLogin, postLogout } from '../services/authApi';
+import { getMe, postLogin, postLogout, refreshSession } from '../services/authApi';
+
+// The access cookie lives 15 minutes. Renewing it on a timer keeps requests
+// that cannot retry on a 401 working: <audio src> for answer and TTS audio,
+// and the viva socket handshake.
+const KEEP_ALIVE_MS = 10 * 60 * 1000;
 
 const AuthContext = createContext(null);
 
@@ -35,6 +40,13 @@ export const AuthProvider = ({ children }) => {
       active = false;
     };
   }, [refresh]);
+
+  const signedIn = Boolean(user);
+  useEffect(() => {
+    if (!signedIn) return undefined;
+    const timer = setInterval(() => { refreshSession(); }, KEEP_ALIVE_MS);
+    return () => clearInterval(timer);
+  }, [signedIn]);
 
   const login = useCallback(
     async (identifier, password) => {

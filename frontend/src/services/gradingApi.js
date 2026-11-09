@@ -1,4 +1,5 @@
 import { errorMessage } from '../i18n/core';
+import { authedFetch } from './authApi';
 // API client for lecturer examination review and AI grading (Step 8).
 
 async function handleResponse(res) {
@@ -22,7 +23,7 @@ async function handleResponse(res) {
  * List all viva results for an exam session.
  */
 export async function listSessionResults(sessionId) {
-  const res = await fetch(`/api/exam-sessions/${sessionId}/results`, {
+  const res = await authedFetch(`/api/exam-sessions/${sessionId}/results`, {
     credentials: 'include',
   });
   return handleResponse(res);
@@ -32,7 +33,7 @@ export async function listSessionResults(sessionId) {
  * Get detailed evaluation breakdown for a single viva result.
  */
 export async function getResultDetail(resultId) {
-  const res = await fetch(`/api/results/${resultId}`, {
+  const res = await authedFetch(`/api/results/${resultId}`, {
     credentials: 'include',
   });
   return handleResponse(res);
@@ -42,7 +43,7 @@ export async function getResultDetail(resultId) {
  * Adjust score on a specific criterion with a required reason.
  */
 export async function adjustCriterionScore(criterionScoreId, { score, reason }) {
-  const res = await fetch(`/api/criterion-scores/${criterionScoreId}`, {
+  const res = await authedFetch(`/api/criterion-scores/${criterionScoreId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
@@ -55,7 +56,7 @@ export async function adjustCriterionScore(criterionScoreId, { score, reason }) 
  * Finalize viva examination result score.
  */
 export async function finalizeResult(resultId) {
-  const res = await fetch(`/api/results/${resultId}/finalize`, {
+  const res = await authedFetch(`/api/results/${resultId}/finalize`, {
     method: 'POST',
     credentials: 'include',
   });
@@ -66,7 +67,7 @@ export async function finalizeResult(resultId) {
  * Reopen a finalized viva examination result for review.
  */
 export async function reopenResult(resultId) {
-  const res = await fetch(`/api/results/${resultId}/reopen`, {
+  const res = await authedFetch(`/api/results/${resultId}/reopen`, {
     method: 'POST',
     credentials: 'include',
   });
@@ -77,7 +78,7 @@ export async function reopenResult(resultId) {
  * Request background regrading via AI.
  */
 export async function regradeResult(resultId) {
-  const res = await fetch(`/api/results/${resultId}/regrade`, {
+  const res = await authedFetch(`/api/results/${resultId}/regrade`, {
     method: 'POST',
     credentials: 'include',
   });

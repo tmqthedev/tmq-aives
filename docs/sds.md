@@ -4,7 +4,7 @@
 **Tên hệ thống**: AIVES (AI-assisted Viva Examination System)  
 **Mã học phần / Đồ án**: SWD392 — Software Architecture and Design  
 **Tác giả**: @tmqthedev & Antigravity AI Pair Programmer  
-**Ngày cập nhật**: 30/10/2026 · Phiên bản: 2.2 (Step 14: quản trị đầy đủ, audit log, ngân hàng câu hỏi theo luồng)
+**Ngày cập nhật**: 05/11/2026 · Phiên bản: 2.3 (Step 14: quản trị đầy đủ, audit log, ngân hàng câu hỏi theo luồng; #63–#69: trang lỗi HTTP, tự làm mới phiên, kiểm tra thiết bị âm thanh, chấm 0 câu không trả lời)
 
 ---
 
@@ -125,9 +125,10 @@ Ghi chú: phạm vi môn học được kiểm tra trong tầng service, vì ph�
 ```text
 frontend/src/
 ├── assets/              # Static icons, styles, logo
-├── components/          # Modal.jsx (render qua portal) và UI primitive trong components/ui/ (gồm UserPicker)
+├── components/          # Modal.jsx (render qua portal), UI primitive trong components/ui/ (gồm UserPicker),
+│                        # exam/DeviceCheckModal.jsx (kiểm tra micro + loa trước khi thi)
 ├── config/              # api.js (apiBaseUrl), lecturerFlow.js (thứ tự 7 bước của giảng viên)
-├── contexts/            # AuthContext (quản lý phiên qua /api/auth/me)
+├── contexts/            # AuthContext (nạp phiên qua /api/auth/me, làm mới phiên mỗi 10 phút khi đã đăng nhập)
 ├── features/auth/       # Trang đăng nhập
 ├── i18n/                # vi.json, en.json, core.js, useLocale, LanguageSwitcher (Step 13)
 ├── pages/               # Trang ứng dụng theo vai trò:
@@ -135,9 +136,16 @@ frontend/src/
 │   ├── lecturer/        # Dashboard, Sessions, ExamSessions, Topics, Questions, Rubrics, Materials,
 │   │                    # PendingReview, EvaluationReview
 │   └── student/         # Dashboard, VivaSession (phòng thi /student/viva?interviewId=…), Results, ResultDetail
-├── routes/              # AppRoutes.jsx định tuyến bảo vệ theo vai trò
-└── services/            # API client wrappers (authApi, gradingApi, interviewSocket, v.v.)
+├── routes/              # AppRoutes.jsx định tuyến bảo vệ theo vai trò, ErrorBoundary, route `*` → 404
+├── services/            # API client wrappers (authApi: apiRequest/authedFetch/refreshSession, gradingApi, interviewSocket, v.v.)
+└── shared/              # components/ErrorPage (ErrorPage + ErrorBoundary), utils/httpStatus.js (ROLE_HOME, httpStatusOf),
+                         # utils/audioDevices.js (chọn micro, mức âm, mã lỗi micro, cờ đã kiểm tra thiết bị)
+frontend/test/               # node:test (`npm test`): language.test.js (i18n), audioDevices.test.js (hàm thuần trong audioDevices.js)
 ```
+
+- **Phiên đăng nhập**: mọi lời gọi API đi qua `authedFetch`; gặp `401` thì gọi `POST /api/auth/refresh` một lần (các lời gọi đồng thời dùng chung một promise refresh, vì refresh token xoay vòng) rồi gửi lại. Không áp dụng cho các endpoint `/auth/login|refresh|logout|forgot-password|reset-password|set-password`. `AuthContext` làm mới phiên mỗi 10 phút khi đã đăng nhập để thẻ `<audio>` và bắt tay Socket.IO (không tự thử lại được) có cookie còn hạn; phòng thi tự refresh một lần khi bắt tay socket bị từ chối với `AUTHENTICATION_REQUIRED`/`INVALID_TOKEN`.
+- **Trang lỗi**: `ErrorPage` hiển thị trang theo mã HTTP (400, 401, 403, 404, 409, 500, 503; 502/504 → 503) với nút quay lại, về trang chủ theo vai trò hoặc đăng nhập, và *Thử lại* khi trang truyền `onRetry`. `ProtectedRoute` hiển thị 403 trong khung ứng dụng khi người dùng mở khu vực của vai trò khác; mỗi khu vực vai trò và cấp ứng dụng có route `*` → 404 và một `ErrorBoundary` (reset khi đổi đường dẫn). Trang chi tiết kết quả (giảng viên, sinh viên) chọn trang lỗi theo `httpStatusOf(err)`.
+- **Kiểm tra thiết bị**: Dashboard sinh viên mở `DeviceCheckModal` trước `POST /api/interviews`; chỉ khi micro ghi nhận đủ 600 ms tiếng nói và thí sinh xác nhận đã nghe âm thanh thử thì mới tạo/khôi phục phiên, ghi cờ `aives.deviceCheck.<interviewId>` vào `sessionStorage` và chuyển tới phòng thi. Phòng thi thấy cờ thì gửi `interview:ready` ngay, không thì hiển thị bước kiểm tra micro tại chỗ. Micro đã chọn được nhớ ở `localStorage` (`aives.micDeviceId`) và được dùng khi ghi âm câu trả lời (`openMicStream`, mất thiết bị thì về micro mặc định).
 
 Phòng thi dùng `MediaRecorder` (`audio/webm;codecs=opus` khi trình duyệt hỗ trợ), phát `audio:chunk` mỗi 1 giây qua Socket.IO và gửi `answer:end` sau khi `dataavailable` cuối đã được phát.
 
@@ -308,7 +316,7 @@ Khi đóng sớm, `closes_at` được kéo về thời điểm đóng, nên `KE
                ┌──────────────┐
                │ NOT_STARTED  │
                └──────┬───────┘
-                      │ student enters & mic ready
+                      │ device check passed → POST /api/interviews
                       ▼
                ┌──────────────┐
        ┌──────▶│ IN_PROGRESS  │◀──────┐
@@ -360,6 +368,8 @@ Khi đóng sớm, `closes_at` được kéo về thời điểm đóng, nên `KE
                             │ reopen ──▶ FLAGGED (nếu còn flag_reason) hoặc AI_SUGGESTED
                             │ regrade ──▶ AI_SCORING (chấm lại bằng AI)
 ```
+
+Câu chính không có câu trả lời (`isUnansweredQuestion` trong `domain/scoringRules.js`: mọi lượt rỗng, chỉ dấu câu, nhãn STT trong ngoặc hoặc âm ngập ngừng, hoặc câu chưa được hỏi trước hạn) được `GradingService` chấm 0 cho câu và mọi tiêu chí mà **không gọi LLM** (`model_id = rule:no-answer`, `confidence = 1`, `ai_level_id = null`, nhận xét theo ngôn ngữ kỳ thi); câu đó vẫn tính 0 vào trung bình và tự nó không gây cờ.
 
 Điều kiện `FLAGGED` (`domain/scoringRules.js`): LLM lỗi hoặc trả sai schema; có lượt `FAILED`; hoặc một câu có `flag_reason` (độ tin cậy < 0.6, thiếu tiêu chí). Bài bị cờ vẫn hiển thị điểm AI cho giám khảo kèm banner cảnh báo và lý do.
 
@@ -419,7 +429,7 @@ Lỗi giọng nói: STT lỗi sau hai lần gọi trả `turn:retry` (`STT_FAILE
 1. **Xác thực và Quản lý Phiên (Authentication & Session)**:
    - Sử dụng cặp token HMAC JWT ký bảo mật bằng `JWT_SECRET` (tối thiểu 32 ký tự ngẫu nhiên).
    - Lưu trữ trong Cookie với đầy đủ các thuộc tính bảo vệ: `httpOnly` (chống XSS đánh cắp token), `Secure` (chỉ truyền qua HTTPS trên CloudFront) và `SameSite=Lax`.
-   - Cơ chế Refresh Token Rotation: Mỗi lần làm mới phiên, token cũ bị thu hồi ngay lập tức; phát hiện và chặn đứng tấn công phát lại token cũ (Replay Attack).
+   - Cơ chế Refresh Token Rotation: Mỗi lần làm mới phiên, token cũ bị thu hồi ngay lập tức; phát hiện và chặn đứng tấn công phát lại token cũ (Replay Attack). Vì vậy SPA gộp các yêu cầu refresh đồng thời thành một lần gọi (`refreshSession` trong `services/authApi.js`), xem mục 3.2.
 2. **Bảo vệ Chống Giả mạo Yêu cầu Chéo trang (CSRF Protection)**:
    - Middleware `verifyOrigin` đối soát bắt buộc header `Origin` của các request thay đổi trạng thái (`POST`, `PUT`, `PATCH`, `DELETE`) với biến môi trường `APP_BASE_URL`.
 3. **Phân quyền Đa tầng (Multi-tier Authorization)**:

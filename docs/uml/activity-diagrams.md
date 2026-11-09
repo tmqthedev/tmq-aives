@@ -124,14 +124,18 @@ flowchart TB
 
 ## 3. Thi vấn đáp với AI (một lượt hỏi đáp)
 
-Nguồn: `InterviewService.startOrResume`, `markQuestionPlayed`, `submitAnswer`, `_endInterview`; `interview/decideNextStep.js`; `realtime/interviewSocket.js`; `frontend/src/pages/student/`.
+Nguồn: `InterviewService.startOrResume`, `markQuestionPlayed`, `submitAnswer`, `_endInterview`; `interview/decideNextStep.js`; `realtime/interviewSocket.js`; `frontend/src/pages/student/`, `frontend/src/components/exam/DeviceCheckModal.jsx`, `frontend/src/shared/utils/audioDevices.js`.
 
 Thứ tự quyết định sau mỗi câu trả lời là cố định: (1) quá `deadline_at` → kết thúc; (2) câu trả lời rỗng → câu chính tiếp; (3) LLM đề xuất hỏi thêm VÀ còn lượt follow-up → hỏi thêm; (4) còn lại → câu chính tiếp, hết câu chính → kết thúc.
 
 ```mermaid
 flowchart TB
   subgraph S["Student (SPA, Socket.IO /interview)"]
-    s((" ")):::start --> b1(["Vào phòng thi: POST /api/interviews"])
+    s((" ")):::start --> dc(["Dashboard: Bắt đầu / Tiếp tục thi → DeviceCheckModal"])
+    dc --> dk{"trình duyệt hỗ trợ, micro đủ 600 ms tiếng nói,<br/>đã nghe âm thanh thử?"}
+    dk -- "không: sửa thiết bị rồi thử lại" --> dc
+    dk -- "huỷ" --> f2(((" "))):::stop
+    dk -- "có" --> b1(["POST /api/interviews; ghi cờ đã kiểm tra (sessionStorage);<br/>vào /student/viva, interview:join → interview:ready"])
     b2(["Phát audio câu hỏi<br/>(TTS lỗi → Web Speech của trình duyệt)"])
     b3(["Ghi âm MediaRecorder webm/opus,<br/>gửi audio:chunk mỗi 1 s"])
     b4(["answer:end (hoặc hết giờ: tự nộp phần đã nói)"])
@@ -186,7 +190,7 @@ flowchart TB
   classDef stop fill:#000,stroke:#000,stroke-width:4px,color:#000
 ```
 
-Ngoài luồng trên: việc nền `EXPIRE_INTERVIEWS` chạy mỗi `INTERVIEW_SWEEP_INTERVAL_SEC` và gọi `_endInterview(DEADLINE_REACHED)` cho phiên đã quá `deadline_at + grace`; `pauseInterview` / `resumeInterview` tạm dừng và bù thời gian khi hệ thống lỗi.
+Phòng thi mở trực tiếp (không có cờ đã kiểm tra trong tab) hiển thị bước kiểm tra micro tại chỗ trước `interview:ready`. Ngoài luồng trên: việc nền `EXPIRE_INTERVIEWS` chạy mỗi `INTERVIEW_SWEEP_INTERVAL_SEC` và gọi `_endInterview(DEADLINE_REACHED)` cho phiên đã quá `deadline_at + grace`; `pauseInterview` / `resumeInterview` tạm dừng và bù thời gian khi hệ thống lỗi.
 
 ## 4. Chấm điểm bằng AI và giảng viên duyệt
 
@@ -198,7 +202,9 @@ flowchart TB
     s((" ")):::start --> g1(["viva_result → AI_SCORING"])
     g1 --> g2(["Tải interview, assigned questions,<br/>qa_turn, rubric criteria + performance levels"])
     g2 --> fk[" "]:::fork
-    fk --> g3(["Với mỗi câu chính: LLM gradeQuestion<br/>(câu hỏi + lượt follow-up + rubric)"])
+    fk --> na{"Với mỗi câu chính: isUnansweredQuestion?<br/>(mọi lượt rỗng / dấu câu / [nhãn STT] /<br/>âm ngập ngừng, hoặc chưa được hỏi)"}
+    na -- "có" --> nz(["0 điểm câu + mọi tiêu chí, không gọi LLM;<br/>model_id rule:no-answer, confidence 1"])
+    na -- "không" --> g3(["LLM gradeQuestion<br/>(câu hỏi + lượt follow-up + rubric)"])
     g3 --> g4{"lỗi LLM?"}
     g4 -- "tạm thời (Throttling, timeout, ...)" --> rt(["throw → JobQueue thử lại"]) --> g1
     g4 -- "lỗi khác" --> g5(["Ghi đánh giá rỗng, flag_reason =<br/>AI grading service failure"])
@@ -206,6 +212,7 @@ flowchart TB
     g6 --> g7(["calculateQuestionScore:<br/>tổng (điểm / max × weight), quy về thang 10"])
     g5 --> jn[" "]:::fork
     g7 --> jn
+    nz --> jn
     jn --> g8(["Lưu question_evaluation + criterion_score;<br/>calculateVivaTotalScore = trung bình câu chính"])
     g8 --> g9{"detectFlagReason: LLM lỗi, turn FAILED,<br/>có flag_reason, confidence < 0.6?"}
     g9 -- "có" --> fl(["status = FLAGGED"])

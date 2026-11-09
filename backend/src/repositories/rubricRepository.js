@@ -70,11 +70,11 @@ class RubricRepository {
 
       if (maxScore !== undefined) {
         values.push(maxScore);
-        fields.push(`max_score = ${values.length}`);
+        fields.push(`max_score = $${values.length}`);
       }
       if (name !== undefined) {
         values.push(name);
-        fields.push(`name = ${values.length}`);
+        fields.push(`name = $${values.length}`);
       }
 
       if (fields.length > 0) {
@@ -201,7 +201,7 @@ class RubricRepository {
     const values = [];
     if (name !== undefined) {
       values.push(name ?? null);
-      fields.push(`name = ${values.length}`);
+      fields.push(`name = $${values.length}`);
     }
     if (subjectId !== undefined) {
       values.push(subjectId ?? null);

@@ -30,7 +30,7 @@ AIVES giải quyết các bài toán trên bằng mô hình thi vấn đáp tự
 | :--- | :--- | :--- |
 | **Quản trị viên (Admin)** | Tạo tài khoản cho toàn trường nhanh chóng, phân công giảng viên bộ môn, ghi danh sinh viên theo môn học, điều phối lịch thi tập trung. | - Import sinh viên hàng loạt từ Excel (All-or-Nothing).<br>- Tự động gửi link thiết lập mật khẩu một lần qua email.<br>- Gán giảng viên vào môn (`subject_lecturer`) và ghi danh sinh viên (`subject_student`).<br>- Bảng điều phối lịch thi (`/admin/exam-schedule`) để Khởi động (`OPEN`), Đóng (`CLOSED`) và Làm nóng tài nguyên (`Re-warm`). |
 | **Giảng viên (Lecturer)** | Soạn câu hỏi nhanh theo mức độ tư duy Bloom, quản lý chủ đề thi (Topic), tổ chức kỳ thi không mất thời gian ngồi hỏi, chấm bài nhanh và công bằng. | - Tải tài liệu giáo trình (PDF, DOCX, PPTX) và dùng AI RAG sinh câu hỏi kèm trích dẫn nguồn.<br>- Giao diện quản lý Chủ đề thi (`/lecturer/topics`) và Ngân hàng câu hỏi/Rubric theo môn học.<br>- Lên lịch kỳ thi với bảng chọn sinh viên/giảng viên trực quan.<br>- Màn hình thẩm định kết quả (`EvaluationReview`): nghe lại audio, xem minh chứng AI trích xuất, điều chỉnh điểm có lý do và chốt điểm. |
-| **Sinh viên (Student)** | Biết rõ lịch thi của mình, tham gia thi trong môi trường công bằng, giọng đọc tự nhiên, không mất bài khi rớt mạng, xem kết quả minh bạch. | - Xem danh sách kỳ thi được phép tham gia (`/student/dashboard`).<br>- Kiểm tra micro trước khi thi, giao diện hiển thị câu hỏi dạng chữ và phát âm thanh TTS tự nhiên.<br>- Đồng hồ đếm ngược server-authoritative, thi tiếp từ lượt đang dở khi gặp sự cố mạng/F5.<br>- Xem bảng điểm chi tiết từng câu và từng tiêu chí Rubric sau khi kỳ thi đã được chốt điểm (`/student/results`). |
+| **Sinh viên (Student)** | Biết rõ lịch thi của mình, tham gia thi trong môi trường công bằng, giọng đọc tự nhiên, không mất bài khi rớt mạng, xem kết quả minh bạch. | - Xem danh sách kỳ thi được phép tham gia (`/student/dashboard`).<br>- Kiểm tra micro và loa/tai nghe trước khi thi (đồng hồ chỉ chạy sau khi kiểm tra đạt), giao diện hiển thị câu hỏi dạng chữ và phát âm thanh TTS tự nhiên.<br>- Đồng hồ đếm ngược server-authoritative, thi tiếp từ lượt đang dở khi gặp sự cố mạng/F5.<br>- Xem bảng điểm chi tiết từng câu và từng tiêu chí Rubric sau khi kỳ thi đã được chốt điểm (`/student/results`). |
 
 ---
 
@@ -67,7 +67,7 @@ AIVES giải quyết các bài toán trên bằng mô hình thi vấn đáp tự
 | **US-10** | Giảng viên | Thiết lập kỳ thi với danh sách SV và Giám khảo theo môn | Chọn môn học $\rightarrow$ chọn sinh viên đã ghi danh môn và chọn giảng viên bộ môn qua bảng Checkbox trực quan; cấu hình số câu chính, giới hạn hỏi xoáy, thời gian suy nghĩ/trả lời và phân bổ Bloom; cảnh báo sớm nếu chủ đề thiếu câu hỏi đã duyệt. | **P0** |
 | **US-11** | Giảng viên | Gửi lịch thi để Quản trị viên kích hoạt | Chỉ gửi lịch được khi kỳ thi có khung giờ hợp lệ, giờ đóng chưa qua và chủ đề có đủ câu hỏi đã duyệt theo tổng số và từng mức Bloom; trạng thái chuyển sang `SCHEDULED`; cho phép rút lịch về `DRAFT` để chỉnh sửa. | **P0** |
 | **US-12** | Quản trị viên | Xem Bảng lịch thi toàn trường và Khởi động kỳ thi | Xem danh sách kỳ thi của mọi môn; bấm Khởi động chuyển trạng thái `OPEN`, khóa Rubric liên quan, kích hoạt làm nóng Lambda STT/TTS và tổng hợp sẵn âm thanh câu hỏi chạy ngầm. | **P0** |
-| **US-13** | Sinh viên | Xem kỳ thi của mình và tham gia phòng thi giọng nói | Chỉ thấy các kỳ thi có tên mình; thử micro trước khi thi; câu hỏi hiển thị dạng chữ và phát âm thanh đọc tự nhiên; đồng hồ đếm ngược server-authoritative; hết giờ tự động nộp bài. | **P0** |
+| **US-13** | Sinh viên | Xem kỳ thi của mình và tham gia phòng thi giọng nói | Chỉ thấy các kỳ thi có tên mình; kiểm tra micro và loa trước khi bắt đầu (phiên thi chỉ được tạo sau khi kiểm tra đạt); câu hỏi hiển thị dạng chữ và phát âm thanh đọc tự nhiên; đồng hồ đếm ngược server-authoritative; hết giờ tự động nộp bài. | **P0** |
 | **US-14** | Sinh viên | Được AI hỏi xoáy thích ứng khi trả lời chưa đủ ý | AI phân tích câu trả lời, hỏi xoáy thích ứng (dưới 40 từ) khi câu trả lời thiếu ý chính, mơ hồ hoặc mâu thuẫn; không hỏi vượt quá hạn mức cấu hình; không tiết lộ đáp án. | **P0** |
 | **US-15** | Sinh viên | Thi tiếp khi gặp sự cố mạng hoặc tải lại trang (F5) | Hệ thống khôi phục trạng thái từ DynamoDB/Postgres, đưa thí sinh quay lại đúng câu hỏi và lượt đang làm dở với thời gian còn lại chính xác, không bị cộng thêm giờ. | **P1** |
 | **US-16** | Giảng viên | Nhận điểm gợi ý AI có bằng chứng ngay sau khi thi | AI chấm từng tiêu chí Rubric kèm trích dẫn nguyên văn từ câu nói của thí sinh; chỉ rõ điểm mạnh, điểm yếu và ý thiếu; gắn cờ `FLAGGED` bài thi có độ tin cậy thấp. | **P0** |
@@ -101,7 +101,7 @@ AIVES giải quyết các bài toán trên bằng mô hình thi vấn đáp tự
                                  └─ Tổng hợp sẵn audio câu hỏi (PREPARE_EXAM_AUDIO)
                                         │
                                         ▼
-[ 7. Sinh viên ]      ──▶ Vào phòng thi ➔ Mic check ➔ Nghe câu hỏi (TTS) ➔ Trả lời giọng nói (STT)
+[ 7. Sinh viên ]      ──▶ Kiểm tra micro + loa ➔ Vào phòng thi ➔ Nghe câu hỏi (TTS) ➔ Trả lời giọng nói (STT)
                                         │
                                         ├─ AI quyết định hỏi xoáy thích ứng (Nova Pro)
                                         ├─ Tự nộp khi hết giờ đếm ngược

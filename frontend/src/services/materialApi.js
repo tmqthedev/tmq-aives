@@ -1,5 +1,5 @@
 import { errorMessage } from '../i18n/core';
-import { apiRequest } from './authApi';
+import { apiRequest, authedFetch } from './authApi';
 import { apiBaseUrl } from '../config/api';
 
 // --- course materials -----------------------------------------------------
@@ -27,7 +27,7 @@ export async function uploadMaterial({ file, subjectId, topicId, title }) {
     form.append('title', title);
   }
 
-  const response = await fetch(`${apiBaseUrl}/materials`, {
+  const response = await authedFetch(`${apiBaseUrl}/materials`, {
     method: 'POST',
     credentials: 'include',
     body: form,

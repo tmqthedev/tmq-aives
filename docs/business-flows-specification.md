@@ -3,7 +3,7 @@
 
 **Tên hệ thống**: AIVES (AI-assisted Viva Examination System)  
 **Tác giả**: @tmqthedev & Antigravity AI Pair Programmer  
-**Ngày cập nhật**: 25/10/2026 · Phiên bản: 2.0 (Toàn diện Step 1 → Step 13 Live Production)
+**Ngày cập nhật**: 05/11/2026 · Phiên bản: 2.1 (Step 1 → Step 14; bổ sung #63–#69: tự làm mới phiên, kiểm tra thiết bị âm thanh trước khi thi, chấm 0 câu không trả lời, trang lỗi HTTP)
 
 ---
 
@@ -49,7 +49,11 @@
    - Backend phản hồi luôn trả về HTTP `200 { ok: true }` (Enumeration-safe). Nếu email tồn tại, hệ thống tạo bản ghi token `RESET` (hạn 30 phút) và đẩy tác vụ nền `SEND_EMAIL`.
    - Người dùng nhấp vào link email $\rightarrow$ Frontend gửi: `POST /api/auth/reset-password` với `{ token, password }`.
    - Backend cập nhật mật khẩu mới, đánh dấu token đã dùng và thu hồi toàn bộ phiên đăng nhập hiện tại trong `auth_session`.
-4. **Đổi mật khẩu trong phiên (Change Password)**:
+4. **Tự làm mới phiên (Silent Refresh)**:
+   - Mọi lời gọi API của SPA đi qua `authedFetch` (`services/authApi.js`): gặp `401` thì gọi `POST /api/auth/refresh` một lần rồi gửi lại yêu cầu. Các `401` đồng thời dùng chung một lần refresh, vì refresh token xoay vòng và token cũ gửi lại bị từ chối. Các endpoint `/auth/login`, `/auth/refresh`, `/auth/logout`, `/auth/forgot-password`, `/auth/reset-password`, `/auth/set-password` không tự refresh: `401` của chúng là câu trả lời thật.
+   - Khi đã đăng nhập, `AuthContext` làm mới phiên mỗi 10 phút, để các yêu cầu không tự thử lại được (thẻ `<audio>` phát audio câu trả lời và TTS, bắt tay Socket.IO) luôn có access cookie còn hạn.
+   - Bắt tay Socket.IO phòng thi bị từ chối với `AUTHENTICATION_REQUIRED` / `INVALID_TOKEN`: phòng thi làm mới phiên một lần rồi kết nối lại; refresh thất bại mới hiển thị lỗi.
+5. **Đổi mật khẩu trong phiên (Change Password)**:
    - Người dùng đã đăng nhập vào màn hình cá nhân $\rightarrow$ Gửi: `PUT /api/auth/password` với `{ currentPassword, newPassword }`.
    - Backend đối soát mật khẩu hiện tại, cập nhật mật khẩu mới và thu hồi toàn bộ các phiên làm việc khác.
 
@@ -376,9 +380,13 @@ $$\text{DRAFT} \underset{\text{unschedule}}{\overset{\text{schedule}}{\rightleft
    - Sinh viên đăng nhập vào `/student/dashboard`.
    - Frontend gửi: `GET /api/me/exam-sessions`.
    - Backend trả về danh sách các kỳ thi của sinh viên kèm các cờ điều kiện: `canStart` (kỳ thi `OPEN` và trong giờ thi) hoặc `canResume` (phiên thi đang dang dở).
-2. **Vào Phòng thi & Kiểm tra Micro (Mic Check)**:
-   - Sinh viên bấm *Vào thi* $\rightarrow$ Frontend tạo/khôi phục phiên (bước 3) rồi điều hướng tới `/student/viva?interviewId=<id>`.
-   - Thử micro: Trình duyệt yêu cầu cấp quyền micro, sinh viên nói thử câu chào, hệ thống nhận diện biên độ âm thanh đạt chuẩn $\rightarrow$ Bấm *Bắt đầu bài thi*.
+2. **Kiểm tra Thiết bị Âm thanh trước khi Thi (Device Check)**:
+   - Sinh viên bấm *Bắt đầu thi* (hoặc *Tiếp tục thi*) $\rightarrow$ Dashboard mở hộp thoại `DeviceCheckModal`, **chưa** gọi API nào. Đồng hồ thi chưa chạy (khi thi tiếp, hộp thoại báo đồng hồ đã chạy và nhắc kiểm tra nhanh).
+   - Trình duyệt thiếu https, `getUserMedia`, `MediaRecorder` hoặc `AudioContext` $\rightarrow$ báo lỗi, chỉ có nút *Hủy*.
+   - **Micro**: hộp thoại xin quyền micro ngay khi mở; lỗi được giải thích theo loại (bị chặn quyền, không có micro, micro đang bị ứng dụng khác dùng). Sinh viên có thể chọn micro khác (nhớ ở `localStorage`) và ghi thử 3 giây để nghe lại. Đạt khi thanh mức âm ghi nhận đủ 600 ms tiếng nói.
+   - **Loa/tai nghe**: sinh viên bấm phát âm thanh thử và xác nhận *Tôi nghe rõ*; chọn *Tôi không nghe thấy* thì hiển thị hướng dẫn xử lý.
+   - Cả hai bước đạt $\rightarrow$ nút *Bắt đầu thi* / *Tiếp tục bài thi* mới bật. Bấm nút: Frontend tạo/khôi phục phiên (bước 3), ghi nhận "đã kiểm tra" cho bài thi đó trong `sessionStorage` của tab, rồi điều hướng tới `/student/viva?interviewId=<id>`. Tạo phiên lỗi thì đóng hộp thoại và hiển thị lỗi trên Dashboard.
+   - Trong phòng thi: nếu tab đã qua kiểm tra cho bài thi này, phòng thi gửi `interview:ready` ngay sau `interview:join`; nếu không (mở bằng liên kết trực tiếp, tab khác) thì hiển thị bước kiểm tra micro tại chỗ trước khi bắt đầu. Micro được mở theo thiết bị đã chọn, mất thiết bị thì dùng micro mặc định.
 3. **Khởi tạo / Khôi phục Phiên thi**:
    - Frontend gửi: `POST /api/interviews` với `{ examSessionId }`.
    - Backend khởi tạo phiên thi `viva_interview` trạng thái `IN_PROGRESS`, áp dụng thuật toán `pickBalancedQuestions` phân bổ bộ câu hỏi chính cân bằng Bloom, khởi tạo ngữ cảnh tại DynamoDB và kích hoạt kết nối Socket.IO tại namespace `/interview`.
@@ -419,6 +427,8 @@ $$\text{DRAFT} \underset{\text{unschedule}}{\overset{\text{schedule}}{\rightleft
    - Tác vụ nền khởi chạy ngay khi phiên thi kết thúc.
    - LLM Bedrock Nova Pro phân tích toàn văn transcript đối chiếu với Rubric đã khóa của kỳ thi: Xác định mức độ hoàn thành (`performance_level`), chấm điểm từng tiêu chí, trích xuất bằng chứng xác thực (`evidence` trích nguyên văn lời thí sinh), nêu rõ điểm mạnh, điểm yếu và ý còn thiếu.
    - Điểm tổng kết được quy đổi chính xác theo thang điểm 10.
+   - **Câu không có câu trả lời** (mọi lượt của câu chính và câu hỏi phụ đều rỗng, chỉ có dấu câu, nhãn STT như `[silence]` hoặc âm ngập ngừng như "ờ", "ừm", "uh"; hoặc câu chưa được hỏi trước khi hết giờ): chấm 0 điểm cho câu và mọi tiêu chí **mà không gọi LLM**, ghi `model_id = rule:no-answer`, `confidence = 1`, ý còn thiếu là toàn bộ ý chính, nhận xét theo ngôn ngữ kỳ thi. Câu này vẫn tính 0 vào điểm trung bình. Chỉ cần một lượt có nội dung thì câu được gửi cho LLM.
+   - Prompt chấm điểm yêu cầu LLM chỉ chấm những gì thí sinh thực sự nói (không cho điểm nội dung chỉ có trong đáp án mẫu hay ý chính) và chọn mức thấp nhất cho mọi tiêu chí khi câu trả lời không liên quan (ví dụ "em không biết", nói lạc đề).
    - Nếu AI lỗi/sai schema, có lượt `FAILED`, hoặc một câu có độ tin cậy thấp ($< 0.6$) hay thiếu tiêu chí $\rightarrow$ Gán cờ `FLAGGED` kèm `flag_reason` để giám khảo rà soát kỹ. Nếu thành công $\rightarrow$ Gán `AI_SUGGESTED`.
 2. **Giám khảo Thẩm định & Chốt điểm (`EvaluationReview.jsx`)**:
    - Giảng viên truy cập danh sách kết quả kỳ thi: `GET /api/exam-sessions/:id/results`.
@@ -438,6 +448,8 @@ $$\text{DRAFT} \underset{\text{unschedule}}{\overset{\text{schedule}}{\rightleft
 ### 4. Luật nghiệp vụ (BR)
 - **BR-F10.1 (Examiner Guard)**: Chỉ có `ADMIN`, người tạo kỳ thi (`created_by`), hoặc giám khảo có tên trong `exam_session_examiner` mới có quyền ghi (chỉnh điểm, finalize, reopen, regrade). Giảng viên khác cùng bộ môn chỉ có quyền xem (Read-only).
 - **BR-F10.2 (Score Adjustment Audit)**: Mọi thao tác thay đổi điểm số bắt buộc phải ghi rõ lý do (`reason`) và được lưu vết lịch sử vĩnh viễn.
+- **BR-F10.3 (No-answer Rule)**: Câu không có câu trả lời luôn được 0 điểm theo luật, không phụ thuộc LLM; giám khảo vẫn có thể điều chỉnh điểm như mọi câu khác (có lý do).
+- **BR-F10.4 (Trang lỗi)**: Mở chi tiết kết quả gặp lỗi API thì hiển thị trang lỗi theo mã HTTP (404 khi không tồn tại hoặc sinh viên mở kết quả chưa chốt, 403 khi ngoài phạm vi, 5xx/409 có nút *Thử lại*). Lỗi trong lúc màn hình thẩm định tự làm mới định kỳ không xóa dữ liệu đang hiển thị.
 - **BR-F10.3 (Student Privacy & Isolation)**: Sinh viên chỉ được xem kết quả khi bài thi đã ở trạng thái `FINALIZED`. Khi bài thi bị mở lại (`reopen`), kết quả lập tức bị ẩn khỏi sinh viên.
 
 ---
@@ -569,3 +581,5 @@ Toàn bộ các mã lỗi trả về trong thuộc tính `code` của JSON respo
 | `NOT_ENOUGH_QUESTIONS` | **409** | Số lượng câu hỏi đã duyệt trong chủ đề không đủ để đáp ứng cấu hình kỳ thi theo mức Bloom. |
 | `STUDENT_VIEW_LEAK` | **500** | Lỗi bảo mật nội bộ: Phát hiện trường dữ liệu nhạy cảm bị rò rỉ trong View của sinh viên. |
 | `INTERNAL_SERVER_ERROR` | **500** | Lỗi xử lý ngoại lệ nội bộ không mong muốn phía máy chủ. |
+
+**Hiển thị lỗi trên giao diện**: trang nhận `code` để chọn thông báo (`i18n/core.js` `errorMessage`). Khi lỗi làm cả trang không dùng được, SPA hiển thị trang lỗi chung theo mã HTTP (`shared/components/ErrorPage`: 400, 401, 403, 404, 409, 500, 503; 502/504 dùng trang 503). Đường dẫn không tồn tại là 404; mở khu vực của vai trò khác là 403 trong khung ứng dụng của người dùng; lỗi render của một trang được `ErrorBoundary` bắt thành trang 500 có nút *Thử lại*.

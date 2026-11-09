@@ -1,5 +1,5 @@
 import { errorMessage } from '../i18n/core';
-import { apiRequest } from './authApi';
+import { apiRequest, authedFetch } from './authApi';
 import { apiBaseUrl } from '../config/api';
 
 // --- questions ------------------------------------------------------------
@@ -67,7 +67,7 @@ export function importQuestions(file) {
 // binary blob (apiRequest only decodes JSON) and handed to the browser as a
 // file download rather than returning parsed data.
 export async function downloadTemplate() {
-  const response = await fetch(`${apiBaseUrl}/questions/template`, {
+  const response = await authedFetch(`${apiBaseUrl}/questions/template`, {
     credentials: 'include',
   });
   if (!response.ok) {
