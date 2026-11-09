@@ -68,6 +68,7 @@ class ExamSessionService {
     ttsAdapter,
     examLaunchService,
     db,
+    realtimeBus,
     clock = () => new Date(),
     logger = console,
     random = Math.random,
@@ -77,6 +78,7 @@ class ExamSessionService {
     this.clock = clock;
     this.examLaunchService = examLaunchService;
     this.subjectRepository = subjectRepository;
+    this.realtimeBus = realtimeBus || null;
     // Reuse the shared SubjectScope helper for lecturer->subject enforcement.
     // app.js always injects one; callers that pass only a subjectRepository
     // (e.g. unit fakes) get an equivalent instance built here so the scope
@@ -284,7 +286,7 @@ class ExamSessionService {
     }
     const lang = await this._requireBankLanguage(parsedTopicId);
 
-    return this.examSessionRepository.create({
+    const created = await this.examSessionRepository.create({
       subjectId: parsedSubjectId,
       topicId: parsedTopicId,
       title: title ?? null,
@@ -301,6 +303,22 @@ class ExamSessionService {
       status: 'DRAFT',
       createdBy: user ? user.id : null,
     });
+    this._publishExam(created, 'created');
+    return created;
+  }
+
+  _publishExam(session, action) {
+    if (!this.realtimeBus || !session) return;
+    try {
+      this.realtimeBus.publish('exam', {
+        action,
+        subjectId: session.subject_id,
+        examSessionId: session.exam_session_id,
+        status: session.status,
+      });
+    } catch (err) {
+      this.logger.warn({ err, examSessionId: session.exam_session_id }, 'exam realtime publish failed');
+    }
   }
 
   async getSession({ user, examSessionId } = {}) {
@@ -328,6 +346,29 @@ class ExamSessionService {
       byId.set(row.exam_session_id, row);
     }
     return [...byId.values()].sort((a, b) => a.exam_session_id - b.exam_session_id);
+  }
+
+  // Monitoring aggregate: { [examSessionId]: { inProgress, completed } } for the
+  // exams this user may see (admin: all; lecturer: same scope as listSessions).
+  async getInterviewCounts({ user } = {}) {
+    if (!user || !['ADMIN', 'LECTURER'].includes(user.role)) {
+      throw httpError(403, 'FORBIDDEN', 'Only admins and lecturers can view exam monitoring.');
+    }
+    let ids = null;
+    if (user.role === 'LECTURER') {
+      ids = (await this.listSessions({ user })).map((s) => Number(s.exam_session_id));
+    }
+    const rows = typeof this.examSessionRepository.countInterviewsByExam === 'function'
+      ? await this.examSessionRepository.countInterviewsByExam(ids) : [];
+    const counts = {};
+    for (const id of ids || []) counts[id] = { inProgress: 0, completed: 0 };
+    for (const r of rows) {
+      counts[Number(r.exam_session_id)] = {
+        inProgress: Number(r.in_progress) || 0,
+        completed: Number(r.completed) || 0,
+      };
+    }
+    return { counts };
   }
 
   async getCreateOptions({ user } = {}) {
@@ -479,7 +520,9 @@ class ExamSessionService {
       throw httpError(400, 'VALIDATION_ERROR', 'At least one field is required to update a session.');
     }
 
-    return this.examSessionRepository.update(session.exam_session_id, patch);
+    const updated = await this.examSessionRepository.update(session.exam_session_id, patch);
+    this._publishExam(updated, 'updated');
+    return updated;
   }
 
   // --- Roster + examiners --------------------------------------------------
@@ -566,6 +609,7 @@ class ExamSessionService {
       session.exam_session_id,
       resolved.map((r) => r.app_user_id),
     );
+    this._publishExam(session, 'updated');
     return {
       ok: true,
       students: resolved.map((r) => ({ id: r.app_user_id, code: r.code })),
@@ -597,6 +641,7 @@ class ExamSessionService {
     }
 
     const saved = await this.examSessionRepository.setExaminers(session.exam_session_id, ids);
+    this._publishExam(session, 'updated');
     return { ok: true, examiners: saved };
   }
 
@@ -715,6 +760,7 @@ class ExamSessionService {
       { scheduled_at: now.toISOString(), scheduled_by: user ? user.id : null },
     );
     if (!updated) assertTransition('UNKNOWN', 'SCHEDULED');
+    this._publishExam(updated, 'status_changed');
     return updated;
   }
 
@@ -728,6 +774,7 @@ class ExamSessionService {
       { scheduled_at: null, scheduled_by: null },
     );
     if (!updated) assertTransition('UNKNOWN', 'DRAFT');
+    this._publishExam(updated, 'status_changed');
     return updated;
   }
 
@@ -768,6 +815,7 @@ class ExamSessionService {
       return row;
     });
 
+    this._publishExam(updated, 'status_changed');
     this._launchInBackground(updated);
     return updated;
   }
@@ -810,6 +858,7 @@ class ExamSessionService {
       patch,
     );
     if (!updated) assertTransition('UNKNOWN', 'CLOSED');
+    this._publishExam(updated, 'status_changed');
     return updated;
   }
 
@@ -851,6 +900,7 @@ class ExamSessionService {
       throw err;
     }
     await this.examSessionRepository.remove(session.exam_session_id);
+    this._publishExam(session, 'deleted');
     return { ok: true };
   }
 

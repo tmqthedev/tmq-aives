@@ -22,6 +22,7 @@ import {
   resendSetup,
   importStudents,
 } from '../../services/adminApi';
+import { subscribeBusinessEvents } from '../../services/businessSocket';
 
 const ROLES = ['STUDENT', 'LECTURER', 'ADMIN'];
 const EMPTY_FORM = { code: '', email: '', fullName: '', role: 'STUDENT' };
@@ -90,7 +91,9 @@ export default function AdminUsers() {
   }, [roleFilter, statusFilter, subjectFilter, query, page]);
 
   useEffect(() => {
+    const unsubscribe = subscribeBusinessEvents(load, ['user']);
     load();
+    return unsubscribe;
   }, [load]);
 
   // Debounce the free-text search.

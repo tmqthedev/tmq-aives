@@ -35,6 +35,7 @@ function buildSystemPrompt(language) {
     'Ask a follow-up ONLY when the latest answer misses key points, is ambiguous, or is contradictory;',
     'otherwise choose NEXT_MAIN_QUESTION.',
     'A follow-up must be exactly ONE question of at most 40 words.',
+    'When next_action is ASK_FOLLOW_UP, follow_up_question is REQUIRED, must be a non-empty string, and must be in the exam language; when next_action is NEXT_MAIN_QUESTION, follow_up_question must be null.',
     'Never reveal the reference answer and never name the missing key points in the question;',
     'ask the student to elaborate instead.',
     'Frame the question around an idea the student already mentioned, using a broad request for explanation.',
@@ -105,7 +106,10 @@ const FOLLOW_UP_TOOL = {
           follow_up_reason: { type: ['string', 'null'], enum: [...FOLLOW_UP_REASONS, null] },
           covered_key_points: { type: 'array', items: { type: 'string' } },
           missing_key_points: { type: 'array', items: { type: 'string' } },
-          follow_up_question: { type: ['string', 'null'] },
+          follow_up_question: {
+            type: ['string', 'null'],
+            description: 'REQUIRED as a non-empty string in the exam language whenever next_action is ASK_FOLLOW_UP; null whenever next_action is NEXT_MAIN_QUESTION.',
+          },
           rationale: {
             type: 'object',
             properties: {

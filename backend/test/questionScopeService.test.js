@@ -13,9 +13,11 @@ class FakeQuestionRepo {
     this.rows = new Map([
       [1, {
         question_id: 1, topic_id: 10, status: 'PENDING_REVIEW', rubric_id: 5, content: 'in-scope',
+        reference_answer: 'Answer one.', key_points: ['key point one'],
       }],
       [2, {
         question_id: 2, topic_id: 20, status: 'PENDING_REVIEW', rubric_id: 6, content: 'out-of-scope',
+        reference_answer: 'Answer two.', key_points: ['key point two'],
       }],
     ]);
   }

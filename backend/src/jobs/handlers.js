@@ -125,8 +125,26 @@ function makeGenerateQuestionsHandler({
   topicRepository,
   embeddingAdapter,
   llmAdapter,
+  realtimeBus = null,
   logger = console,
 }) {
+  // Invalidation after the status write; never fails the job.
+  async function publishJobStatus(domainJob, status) {
+    if (!realtimeBus) return;
+    try {
+      const topic = domainJob.topic_id != null && topicRepository
+        ? await topicRepository.getById(Number(domainJob.topic_id)) : null;
+      realtimeBus.publish('question', {
+        action: 'status_changed',
+        generationJobId: domainJob.question_generation_job_id,
+        topicId: domainJob.topic_id,
+        subjectId: topic ? topic.subject_id : null,
+        status,
+      });
+    } catch (err) {
+      logger.warn({ err }, 'generation realtime publish failed');
+    }
+  }
   // eslint-disable-next-line global-require
   const {
     QuestionGenerationService,
@@ -158,6 +176,7 @@ function makeGenerateQuestionsHandler({
         'RUNNING',
         null,
       );
+      await publishJobStatus(domainJob, 'RUNNING');
 
       // A retried or recovered run starts clean: drop whatever an earlier
       // attempt left unreviewed so questions are not duplicated.
@@ -223,6 +242,7 @@ function makeGenerateQuestionsHandler({
         'COMPLETED',
         survivors.length === 0 ? NO_GROUNDABLE_ERROR : null,
       );
+      await publishJobStatus(domainJob, 'COMPLETED');
 
       logger.info(
         {
@@ -248,6 +268,7 @@ function makeGenerateQuestionsHandler({
         attemptsLeft ? 'RUNNING' : 'FAILED',
         err && err.message ? err.message : 'Question generation failed.',
       );
+      await publishJobStatus(domainJob, attemptsLeft ? 'RUNNING' : 'FAILED');
       // Rethrow so the queue owns retry/backoff.
       throw err;
     }
@@ -307,8 +328,10 @@ function makeSendEmailHandler(emailService, logger) {
 /**
  * Build the GRADE_INTERVIEW handler. Reads job.payload.interviewId and calls
  * gradingService.gradeInterview. Rethrows transient errors so JobQueue can retry.
+ * On the LAST attempt it marks the result FLAGGED/FAILED (never stuck in
+ * AI_SCORING); on an earlier attempt it marks stage RETRYING.
  */
-function makeGradeInterviewHandler(gradingService, logger = console) {
+function makeGradeInterviewHandler(gradingService, logger = console, env = {}) {
   return async function gradeInterviewHandler(job) {
     const payload = job.payload || {};
     const { interviewId } = payload;
@@ -322,6 +345,18 @@ function makeGradeInterviewHandler(gradingService, logger = console) {
       logger.info({ jobId: job.background_job_id, interviewId }, 'GRADE_INTERVIEW completed successfully');
     } catch (err) {
       logger.error({ jobId: job.background_job_id, interviewId, err }, 'GRADE_INTERVIEW failed');
+      const maxAttempts = Number(job.max_attempts ?? (env && env.jobMaxAttempts) ?? 3);
+      const attempts = Number(job.attempts) || 0;
+      const last = attempts >= maxAttempts;
+      try {
+        if (last) {
+          await gradingService.markGradingFailed({ interviewId: Number(interviewId) });
+        } else if (typeof gradingService.markGradingRetrying === 'function') {
+          await gradingService.markGradingRetrying({ interviewId: Number(interviewId) });
+        }
+      } catch (markErr) {
+        logger.error({ jobId: job.background_job_id, interviewId, err: markErr }, 'GRADE_INTERVIEW progress-failure marking failed');
+      }
       throw err;
     }
   };
@@ -520,13 +555,14 @@ function registerDefaultHandlers(queue, deps = {}) {
       topicRepository: deps.topicRepository,
       embeddingAdapter: deps.embeddingAdapter,
       llmAdapter: deps.llmAdapter,
+      realtimeBus: deps.realtimeBus,
       logger,
     }));
   } else {
     queue.registerHandler('GENERATE_QUESTIONS', makeStubHandler('GENERATE_QUESTIONS', logger));
   }
   if (deps.gradingService) {
-    queue.registerHandler('GRADE_INTERVIEW', makeGradeInterviewHandler(deps.gradingService, logger));
+    queue.registerHandler('GRADE_INTERVIEW', makeGradeInterviewHandler(deps.gradingService, logger, deps.env));
   } else {
     queue.registerHandler('GRADE_INTERVIEW', makeStubHandler('GRADE_INTERVIEW', logger));
   }

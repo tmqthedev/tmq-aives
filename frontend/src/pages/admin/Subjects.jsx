@@ -1,5 +1,5 @@
 import { t, useLocale, translateMessage } from '../../i18n/index';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Plus, Pencil, Trash2, Users as UsersIcon, GraduationCap, Archive, ArchiveRestore } from 'lucide-react';
 import { Badge } from '../../components/ui/Badge';
 import { Card } from '../../components/ui/Card';
@@ -21,6 +21,7 @@ import {
   listSubjectLecturers,
   assignStudents,
 } from '../../services/adminApi';
+import { subscribeBusinessEvents } from '../../services/businessSocket';
 
 export default function AdminSubjects() {
   useLocale();
@@ -52,7 +53,7 @@ export default function AdminSubjects() {
   const [selectedStudents, setSelectedStudents] = useState([]);
   const [loadingLecturers, setLoadingLecturers] = useState(false);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
@@ -63,11 +64,13 @@ export default function AdminSubjects() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
+    const unsubscribe = subscribeBusinessEvents(load, ['subject']);
     load();
-  }, []);
+    return unsubscribe;
+  }, [load]);
 
   const openCreate = () => {
     setEditing(null);

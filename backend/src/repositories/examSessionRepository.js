@@ -1,3 +1,19 @@
+// Keep this predicate aligned with migration 030. Approval status alone is not
+// sufficient: legacy rows or later edits may lack grading knowledge.
+function eligibleApprovedQuestion(alias = '') {
+  const q = alias ? `${alias}.` : '';
+  return `${q}status = 'APPROVED'
+    AND ${q}rubric_id IS NOT NULL
+    AND COALESCE(${q}reference_answer, '') ~ '[^[:space:]]'
+    AND EXISTS (
+      SELECT 1 FROM jsonb_array_elements(
+        CASE WHEN jsonb_typeof(${q}key_points) = 'array' THEN ${q}key_points ELSE '[]'::jsonb END
+      ) AS kp(value)
+      WHERE jsonb_typeof(kp.value) = 'string'
+        AND (kp.value #>> '{}') ~ '[^[:space:]]'
+    )`;
+}
+
 class ExamSessionRepository {
   constructor(db) {
     this.db = db;
@@ -77,7 +93,7 @@ class ExamSessionRepository {
            WHERE m.subject_id = s.subject_id AND m.status = 'READY') AS ready_materials,
          (SELECT COUNT(*)::int FROM rubric r WHERE r.subject_id = s.subject_id) AS rubrics,
          (SELECT COUNT(*)::int FROM question q JOIN topic t ON t.topic_id = q.topic_id
-           WHERE t.subject_id = s.subject_id AND q.status = 'APPROVED') AS approved_questions,
+           WHERE t.subject_id = s.subject_id AND ${eligibleApprovedQuestion('q')}) AS approved_questions,
          (SELECT COUNT(*)::int FROM question q JOIN topic t ON t.topic_id = q.topic_id
            WHERE t.subject_id = s.subject_id AND q.status IN ('DRAFT', 'PENDING_REVIEW')) AS pending_questions,
          (SELECT COUNT(*)::int FROM exam_session e
@@ -111,6 +127,26 @@ class ExamSessionRepository {
       [id],
     );
     return result.rows[0] || null;
+  }
+
+  // Counts only: students IN_PROGRESS / COMPLETED per exam. No student data.
+  async countInterviewsByExam(examSessionIds = null) {
+    const params = [];
+    let where = '';
+    if (Array.isArray(examSessionIds)) {
+      if (examSessionIds.length === 0) return [];
+      params.push(examSessionIds);
+      where = 'WHERE exam_session_id = ANY($1::bigint[])';
+    }
+    const result = await this.db.query(
+      `SELECT exam_session_id,
+              COUNT(*) FILTER (WHERE status = 'IN_PROGRESS') AS in_progress,
+              COUNT(*) FILTER (WHERE status = 'COMPLETED') AS completed
+       FROM viva_interview ${where}
+       GROUP BY exam_session_id`,
+      params,
+    );
+    return result.rows;
   }
 
   async list() {
@@ -310,7 +346,7 @@ class ExamSessionRepository {
     const result = await this.db.query(
       `SELECT topic_id, bloom_level, COUNT(*)::int AS count
        FROM question
-       WHERE topic_id = ANY($1::int[]) AND status = 'APPROVED'
+       WHERE topic_id = ANY($1::int[]) AND ${eligibleApprovedQuestion()}
        GROUP BY topic_id, bloom_level`,
       [topicIds],
     );
@@ -322,7 +358,7 @@ class ExamSessionRepository {
     const result = await this.db.query(
       `SELECT topic_id, language, COUNT(*)::int AS count
        FROM question
-       WHERE topic_id = ANY($1::int[]) AND status = 'APPROVED'
+       WHERE topic_id = ANY($1::int[]) AND ${eligibleApprovedQuestion()}
        GROUP BY topic_id, language`,
       [topicIds],
     );
@@ -331,7 +367,7 @@ class ExamSessionRepository {
 
   async countApprovedQuestionsInTopic(topicId) {
     const result = await this.db.query(
-      "SELECT COUNT(*)::int AS count FROM question WHERE topic_id = $1 AND status = 'APPROVED'",
+      `SELECT COUNT(*)::int AS count FROM question WHERE topic_id = $1 AND ${eligibleApprovedQuestion()}`,
       [topicId],
     );
     return result.rows[0] ? Number(result.rows[0].count) : 0;
@@ -343,7 +379,7 @@ class ExamSessionRepository {
     const result = await client.query(
       `SELECT question_id, bloom_level, rubric_id, content, language
        FROM question
-       WHERE topic_id = $1 AND status = 'APPROVED'
+       WHERE topic_id = $1 AND ${eligibleApprovedQuestion()}
        ORDER BY question_id`,
       [topicId],
     );
@@ -352,7 +388,7 @@ class ExamSessionRepository {
 
   async listApprovedQuestionIdsInTopic(topicId) {
     const result = await this.db.query(
-      "SELECT question_id FROM question WHERE topic_id = $1 AND status = 'APPROVED' ORDER BY question_id",
+      `SELECT question_id FROM question WHERE topic_id = $1 AND ${eligibleApprovedQuestion()} ORDER BY question_id`,
       [topicId],
     );
     return result.rows.map((row) => row.question_id);

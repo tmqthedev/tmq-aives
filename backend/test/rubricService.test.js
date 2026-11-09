@@ -73,6 +73,26 @@ test('creates and lists rubrics with criteria', async () => {
   assert.equal(list[0].criteria[0].name, 'Accuracy');
 });
 
+test('rubric create, update, clone and delete publish safe subject-scoped invalidations', async () => {
+  const db = new InMemoryDatabase({ persist: false });
+  const repository = new RubricRepository(db);
+  const events = [];
+  const rubricService = new RubricService({
+    repository,
+    realtimeBus: { publish: (entity, payload) => events.push({ entity, ...payload }) },
+  });
+  const created = await rubricService.createRubric(sampleRubricPayload({ subjectId: 7 }));
+  await rubricService.updateRubric(created.id, { maxScore: 20 });
+  const cloned = await rubricService.cloneRubric(created.id);
+  await rubricService.deleteRubric(cloned.id);
+  assert.deepEqual(events, [
+    { entity: 'rubric', action: 'created', rubricId: created.id, subjectId: 7 },
+    { entity: 'rubric', action: 'updated', rubricId: created.id, subjectId: 7 },
+    { entity: 'rubric', action: 'created', rubricId: cloned.id, subjectId: 7 },
+    { entity: 'rubric', action: 'deleted', rubricId: cloned.id, subjectId: 7 },
+  ]);
+});
+
 test('rejects rubric when criteria weights do not total 100', async () => {
   const { rubricService } = createRubricService();
 

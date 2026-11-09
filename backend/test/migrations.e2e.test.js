@@ -69,6 +69,21 @@ describeOrSkip('migrations e2e (requires Postgres)', () => {
     }
   });
 
+  test('migration 032 adds STT dispute columns to qa_turn', async () => {
+    const { rows } = await pool.query(
+      `SELECT column_name, data_type, is_nullable
+       FROM information_schema.columns
+       WHERE table_name = 'qa_turn' AND column_name IN ('stt_disputed_at', 'stt_dispute_note')`,
+    );
+    const cols = new Map(rows.map((r) => [r.column_name, r]));
+    expect(cols.has('stt_disputed_at')).toBe(true);
+    expect(cols.get('stt_disputed_at').data_type).toBe('timestamp with time zone');
+    expect(cols.get('stt_disputed_at').is_nullable).toBe('YES');
+    expect(cols.has('stt_dispute_note')).toBe(true);
+    expect(cols.get('stt_dispute_note').data_type).toBe('text');
+    expect(cols.get('stt_dispute_note').is_nullable).toBe('YES');
+  });
+
   test('pgvector extension and material_chunk HNSW index exist', async () => {
     const ext = await pool.query("SELECT 1 FROM pg_extension WHERE extname = 'vector'");
     expect(ext.rowCount).toBe(1);

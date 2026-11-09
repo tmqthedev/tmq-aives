@@ -120,6 +120,10 @@ export function assignStudents(id, payload) {
 
 // Returns { sessions: [...] } with subject/creator info, roster size,
 // interview progress and the Lambda warm-up status per session.
+export function getExamMonitoring() {
+  return apiRequest('/admin/exam-monitoring');
+}
+
 export function listExamSchedule({ status, subjectId, from, to } = {}) {
   const params = new URLSearchParams();
   if (status) params.set('status', status);

@@ -1,5 +1,5 @@
 import { t, useLocale, formatNumber, translateMessage } from '../../i18n/index';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Award, BookOpen, Calendar, ArrowRight } from 'lucide-react';
 import { motion } from 'framer-motion';
@@ -11,6 +11,7 @@ import { Feedback } from '../../components/ui/Feedback';
 import { Table, Thead, Tbody, Tr, Th, Td } from '../../components/ui/Table';
 import { listMyResults } from '../../services/studentApi';
 import { formatDateTime } from '../../shared/utils/formatDate';
+import { useBusinessEvents } from '../../hooks/useBusinessEvents';
 
 export default function StudentResults() {
   useLocale();
@@ -19,24 +20,22 @@ export default function StudentResults() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        const data = await listMyResults();
-        if (!cancelled) setResults(Array.isArray(data) ? data : []);
-      } catch (err) {
-        if (!cancelled) setError(err.message || t("Không thể tải kết quả thi."));
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+  const load = useCallback(async ({ silent = false } = {}) => {
+    try {
+      if (!silent) { setLoading(true); setError(null); }
+      const data = await listMyResults();
+      setResults(Array.isArray(data) ? data : []);
+    } catch (err) {
+      if (!silent) setError(err.message || t("Không thể tải kết quả thi."));
+    } finally {
+      if (!silent) setLoading(false);
+    }
   }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  // Own finalized/reopened results (and reconnects) refresh the list.
+  useBusinessEvents(['result'], () => { load({ silent: true }); });
 
   const getScoreBadgeType = (score) => {
     if (score >= 8.5) return 'success';
@@ -126,7 +125,12 @@ export default function StudentResults() {
                           variant="secondary"
                           size="sm"
                           icon={<ArrowRight size={14} />}
-                          onClick={() => navigate(`/student/results/${r.resultId}`)}
+                          onClick={() => navigate(`/student/results/${r.resultId}`, {
+                            state: {
+                              interviewId: r.interviewId || r.interview_id,
+                              examSessionId: r.examSessionId,
+                            },
+                          })}
                         >{t("Chi tiết")}</Button>
                       </Td>
                     </Tr>

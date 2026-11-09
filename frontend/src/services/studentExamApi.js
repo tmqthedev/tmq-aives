@@ -46,3 +46,14 @@ export function submitAnswer(interviewId, turnId, { transcript, timedOut, signal
     body: { transcript, timedOut, signals },
   });
 }
+
+export function getInterviewTranscript(interviewId) {
+  return apiRequest(`/interviews/${interviewId}/transcript`);
+}
+
+export function disputeTurnStt(interviewId, turnId, note) {
+  return apiRequest(`/interviews/${interviewId}/turns/${turnId}/stt-dispute`, {
+    method: 'POST',
+    body: { note },
+  });
+}

@@ -24,6 +24,7 @@ function makeService(overrides = {}) {
     deletes: [],
     created: [],
     enqueued: [],
+    events: [],
   };
 
   const courseMaterialRepository = {
@@ -69,6 +70,9 @@ function makeService(overrides = {}) {
     },
   };
   const enqueueJob = async (type, payload) => { spies.enqueued.push({ type, payload }); };
+  const realtimeBus = overrides.realtimeBus || {
+    publish: (entity, payload) => spies.events.push({ entity, ...payload }),
+  };
 
   const service = new MaterialService({
     courseMaterialRepository,
@@ -77,6 +81,7 @@ function makeService(overrides = {}) {
     awsClients,
     enqueueJob,
     env: { materialsBucket: 'test-bucket' },
+    realtimeBus,
     logger: silentLogger,
   });
 
@@ -98,6 +103,17 @@ test('upload stores to S3, creates the row, and enqueues INGEST_MATERIAL', async
   assert.equal(spies.enqueued.length, 1);
   assert.equal(spies.enqueued[0].type, 'INGEST_MATERIAL');
   assert.deepEqual(spies.enqueued[0].payload, { materialId: material.course_material_id });
+  assert.deepEqual(spies.events, [{ entity: 'material', action: 'created', materialId: 1, subjectId: 42 }]);
+});
+
+test('material deletion publishes only after repository deletion succeeds', async () => {
+  const { service, spies } = makeService();
+  await service.upload({ user: lecturer, subjectId: 42, file: pdfFile() });
+  await service.delete({ user: lecturer, materialId: 1 });
+  assert.deepEqual(spies.events.map(({ entity, action, materialId, subjectId }) => ({ entity, action, materialId, subjectId })), [
+    { entity: 'material', action: 'created', materialId: 1, subjectId: 42 },
+    { entity: 'material', action: 'deleted', materialId: 1, subjectId: 42 },
+  ]);
 });
 
 test('subjectId <= 0 returns 400 VALIDATION_ERROR before any S3 put or DB write', async () => {

@@ -5,15 +5,17 @@ class AssignedQuestionRepository {
     this.db = db;
   }
 
-  async createMany(interviewId, questionIds, client = this.db) {
+  async createMany(interviewId, questionIds, client = this.db, snapshots = []) {
+    if (snapshots.length !== questionIds.length || snapshots.some((snapshot, i) => !snapshot
+      || snapshot.snapshot_version !== 1 || Number(snapshot.question_id) !== Number(questionIds[i]))) throw new Error('Every assignment requires a knowledge snapshot.');
     const rows = [];
     for (let i = 0; i < questionIds.length; i += 1) {
       // eslint-disable-next-line no-await-in-loop
       const result = await client.query(
-        `INSERT INTO assigned_question (interview_id, question_id, order_no)
-         VALUES ($1, $2, $3)
+        `INSERT INTO assigned_question (interview_id, question_id, order_no, knowledge_snapshot)
+         VALUES ($1, $2, $3, $4::jsonb)
          RETURNING *`,
-        [interviewId, questionIds[i], i + 1],
+        [interviewId, questionIds[i], i + 1, JSON.stringify(snapshots[i])],
       );
       rows.push(result.rows[0]);
     }

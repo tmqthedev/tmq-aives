@@ -106,15 +106,42 @@ class FakeQuestionRepo {
   }
 }
 
+class FakeRubricRepo {
+  constructor(rubrics = []) {
+    this.rubrics = new Map(rubrics.map((r) => [r.rubric_id, r]));
+  }
+
+  async findById(id) {
+    return this.rubrics.get(Number(id)) || null;
+  }
+}
+
+class FakeTopicRepo {
+  constructor(topics = []) {
+    this.topics = new Map(topics.map((t) => [t.topic_id, t]));
+  }
+
+  async getById(id) {
+    return this.topics.get(Number(id)) || null;
+  }
+}
+
 // Embedding adapter stub producing a fixed small vector (never near-duplicate
 // here because the fake repo returns no same-subject embeddings).
 const stubEmbedding = { async embed() { return [1, 0, 0]; } };
 
-function createService() {
+function createService({ rubrics, topics } = {}) {
   const repository = new FakeQuestionRepo();
+  const rubricRepository = rubrics ? new FakeRubricRepo(rubrics) : null;
+  const topicRepository = topics ? new FakeTopicRepo(topics) : null;
   return {
     repository,
-    service: new QuestionService({ repository, embeddingAdapter: stubEmbedding }),
+    service: new QuestionService({
+      repository,
+      embeddingAdapter: stubEmbedding,
+      rubricRepository,
+      topicRepository,
+    }),
   };
 }
 
@@ -136,7 +163,7 @@ test('createQuestion returns { question, warnings } and defaults DRAFT without r
   assert.deepEqual(warnings, []);
 });
 
-test('createQuestion defaults APPROVED when content + topic + rubric present', async () => {
+test('createQuestion defaults PENDING_REVIEW when content + topic + rubric are present', async () => {
   const { service } = createService();
   const { question } = await service.createQuestion({
     topicId: 1,
@@ -144,7 +171,7 @@ test('createQuestion defaults APPROVED when content + topic + rubric present', a
     content: 'Describe polymorphism.',
     language: 'en',
   });
-  assert.equal(question.status, 'APPROVED');
+  assert.equal(question.status, 'PENDING_REVIEW');
   assert.equal(question.rubricId, 5);
 });
 
@@ -211,12 +238,12 @@ test('listQuestions filters by status', async () => {
   const { service } = createService();
   await service.createQuestion({ topicId: 1, content: 'Draft one', language: 'en' });
   await service.createQuestion({
-    topicId: 1, rubricId: 2, content: 'Approved one', language: 'en',
+    topicId: 1, rubricId: 2, content: 'Pending one', language: 'en',
   });
 
-  const approved = await service.listQuestions({ status: 'APPROVED' });
-  assert.equal(approved.length, 1);
-  assert.equal(approved[0].content, 'Approved one');
+  const pending = await service.listQuestions({ status: 'PENDING_REVIEW' });
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].content, 'Pending one');
 });
 
 test('updateQuestion patches fields and keeps its own content non-duplicate', async () => {
@@ -235,7 +262,7 @@ test('updateQuestion patches fields and keeps its own content non-duplicate', as
   assert.equal(same.content, 'Updated question');
 });
 
-test('approve requires an attached rubric (RUBRIC_REQUIRED) and transitions to APPROVED', async () => {
+test('approve requires an attached rubric (RUBRIC_REQUIRED) and a complete knowledge base', async () => {
   const { service, repository } = createService();
   const { question } = await service.createQuestion({ topicId: 1, content: 'needs rubric', language: 'en' });
   // status DRAFT, no rubric.
@@ -248,11 +275,86 @@ test('approve requires an attached rubric (RUBRIC_REQUIRED) and transitions to A
     },
   );
 
-  // Attach a rubric then approve.
-  await repository.update(question.id, { rubricId: 3 });
+  // Attach the rubric AND the grading knowledge (reference answer + key points),
+  // then approve.
+  await repository.update(question.id, {
+    rubricId: 3,
+    referenceAnswer: 'A reference answer.',
+    keyPoints: ['key point one'],
+  });
   const approved = await service.approve(question.id, { reviewedBy: 7 });
   assert.equal(approved.status, 'APPROVED');
   assert.equal(approved.reviewedBy, 7);
+});
+
+test('approve rejects a blank reference answer with 409 QUESTION_INCOMPLETE', async () => {
+  const { service, repository } = createService();
+  const { question } = await service.createQuestion({
+    topicId: 1, rubricId: 5, content: 'needs a reference answer', language: 'en',
+  });
+  await repository.update(question.id, { keyPoints: ['key point one'] });
+
+  await assert.rejects(
+    () => service.approve(question.id, { reviewedBy: 7 }),
+    (error) => {
+      assert.equal(error.statusCode, 409);
+      assert.equal(error.code, 'QUESTION_INCOMPLETE');
+      assert.match(error.message, /referenceAnswer/);
+      return true;
+    },
+  );
+  // The question was not approved.
+  assert.equal((await repository.findById(question.id)).status, 'PENDING_REVIEW');
+});
+
+test('approve rejects missing or empty key points with 409 QUESTION_INCOMPLETE', async () => {
+  const { service, repository } = createService();
+  const { question } = await service.createQuestion({
+    topicId: 1, rubricId: 5, content: 'needs key points', language: 'en',
+  });
+
+  // No key points at all.
+  await repository.update(question.id, { referenceAnswer: 'A reference answer.' });
+  await assert.rejects(
+    () => service.approve(question.id, { reviewedBy: 7 }),
+    (error) => {
+      assert.equal(error.statusCode, 409);
+      assert.equal(error.code, 'QUESTION_INCOMPLETE');
+      assert.match(error.message, /keyPoints/);
+      return true;
+    },
+  );
+
+  // An empty array is still incomplete.
+  await repository.update(question.id, { keyPoints: [] });
+  await assert.rejects(
+    () => service.approve(question.id, { reviewedBy: 7 }),
+    (error) => error.statusCode === 409 && error.code === 'QUESTION_INCOMPLETE',
+  );
+});
+
+test('approve rejects a rubric that belongs to another subject (RUBRIC_SUBJECT_MISMATCH)', async () => {
+  const { service, repository } = createService({
+    rubrics: [{ rubric_id: 5, subject_id: 200 }],
+    topics: [{ topic_id: 1, subject_id: 100 }],
+  });
+  await repository.create({
+    topicId: 1,
+    rubricId: 5,
+    content: 'rubric from another subject',
+    status: 'PENDING_REVIEW',
+    referenceAnswer: 'A reference answer.',
+    keyPoints: ['key point one'],
+  });
+
+  await assert.rejects(
+    () => service.approve(1, { reviewedBy: 7 }),
+    (error) => {
+      assert.equal(error.statusCode, 400);
+      assert.equal(error.code, 'RUBRIC_SUBJECT_MISMATCH');
+      return true;
+    },
+  );
 });
 
 test('reject requires a reason (REASON_REQUIRED) and stores the review note', async () => {
@@ -325,15 +427,21 @@ test('updateQuestion cannot move to APPROVED/REJECTED/ARCHIVED or leave ARCHIVED
   );
 });
 
-test('updateQuestion keeps the rubric on APPROVED questions', async () => {
+test('updateQuestion requires a revision to remove an APPROVED question rubric', async () => {
   const { service } = createService();
   const { question } = await service.createQuestion({
-    topicId: 1, rubricId: 5, content: 'Keep my rubric', language: 'en',
+    topicId: 1,
+    rubricId: 5,
+    content: 'Keep my rubric',
+    language: 'en',
+    referenceAnswer: 'A reference answer.',
+    keyPoints: ['key point one'],
   });
-  assert.equal(question.status, 'APPROVED');
+  const approved = await service.approve(question.id, { reviewedBy: 7 });
+  assert.equal(approved.status, 'APPROVED');
   await assert.rejects(
     () => service.updateQuestion(question.id, { rubricId: null }),
-    (e) => e.statusCode === 409 && e.code === 'RUBRIC_REQUIRED',
+    (e) => e.statusCode === 409 && e.code === 'QUESTION_REVISION_REQUIRED',
   );
 });
 
@@ -352,4 +460,61 @@ test('listQuestions filters by topicId', async () => {
   const forTopic2 = await service.listQuestions({ topicId: 2 });
   assert.equal(forTopic2.length, 1);
   assert.equal(forTopic2[0].topicId, 2);
+});
+
+
+test('approved content edits preserve the active version even with a demotion in the same request', async () => {
+  const { service, repository } = createService();
+  const { question } = await service.createQuestion({
+    topicId: 1, rubricId: 5, content: 'Approved original', language: 'en',
+    referenceAnswer: 'Original answer', keyPoints: ['Original point'],
+  });
+  await service.approve(question.id, { reviewedBy: 7 });
+  const original = await repository.findById(question.id);
+  const edits = {
+    content: 'Changed content', referenceAnswer: 'Changed answer', keyPoints: [],
+    rubricId: null, topicId: 2, language: 'VI', bloomLevel: 'APPLY',
+    source: 'AI', purpose: 'Changed rationale',
+  };
+  for (const [field, value] of Object.entries(edits)) {
+    await assert.rejects(
+      () => service.updateQuestion(question.id, { [field]: value, status: 'PENDING_REVIEW' }),
+      (e) => e.statusCode === 409 && e.code === 'QUESTION_REVISION_REQUIRED',
+    );
+    assert.deepEqual(await repository.findById(question.id), original);
+  }
+  await assert.rejects(
+    () => service.updateQuestion(question.id, { status: 'PENDING_REVIEW' }),
+    (e) => e.statusCode === 409 && e.code === 'QUESTION_REVISION_REQUIRED',
+  );
+  assert.deepEqual(await repository.findById(question.id), original);
+  const unchanged = await service.updateQuestion(question.id, { status: 'APPROVED' });
+  assert.equal(unchanged.status, 'APPROVED');
+});
+
+test('unapproved grading knowledge remains editable and can be explicitly approved afterwards', async () => {
+  const { service } = createService();
+  const { question } = await service.createQuestion({ topicId: 1, content: 'New question', language: 'en' });
+  const edited = await service.updateQuestion(question.id, {
+    rubricId: 5, referenceAnswer: 'Reviewed answer', keyPoints: ['Reviewed point'],
+  });
+  assert.equal(edited.referenceAnswer, 'Reviewed answer');
+  assert.equal((await service.approve(question.id, { reviewedBy: 7 })).status, 'APPROVED');
+});
+
+
+test('approve rejects non-string legacy key points instead of coercing grading knowledge', async () => {
+  const { service, repository } = createService();
+  const { question } = await service.createQuestion({
+    topicId: 1, rubricId: 5, content: 'Malformed legacy key points', language: 'en',
+    referenceAnswer: 'Reference answer',
+  });
+  for (const points of [[42, { x: 1 }, '  '], JSON.stringify([42, { x: 1 }, '  '])]) {
+    await repository.update(question.id, { keyPoints: points });
+    await assert.rejects(
+      () => service.approve(question.id, { reviewedBy: 7 }),
+      (e) => e.statusCode === 409 && e.code === 'QUESTION_INCOMPLETE' && /keyPoints/.test(e.message),
+    );
+    assert.equal((await repository.findById(question.id)).status, 'PENDING_REVIEW');
+  }
 });

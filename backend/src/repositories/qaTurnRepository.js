@@ -128,7 +128,10 @@ QaTurnRepository.UPDATABLE_COLUMNS = [
   'question_audio_key',
   'played_at',
   'answer_deadline_at',
+  'processing_started_at',
   'retry_count',
+  'stt_disputed_at',
+  'stt_dispute_note',
 ];
 
 module.exports = { QaTurnRepository };

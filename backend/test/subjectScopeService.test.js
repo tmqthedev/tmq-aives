@@ -45,8 +45,14 @@ function questionService(rows) {
 }
 
 const QUESTIONS = [
-  { question_id: 1, topic_id: 1, status: 'PENDING_REVIEW', content: 'in subject 10' },
-  { question_id: 2, topic_id: 2, status: 'PENDING_REVIEW', content: 'in subject 20' },
+  {
+    question_id: 1, topic_id: 1, status: 'PENDING_REVIEW', content: 'in subject 10',
+    rubric_id: 5, reference_answer: 'Answer one.', key_points: ['key point one'],
+  },
+  {
+    question_id: 2, topic_id: 2, status: 'PENDING_REVIEW', content: 'in subject 20',
+    rubric_id: 5, reference_answer: 'Answer two.', key_points: ['key point two'],
+  },
   { question_id: 3, topic_id: 3, status: 'DRAFT', content: 'legacy, no subject' },
 ];
 

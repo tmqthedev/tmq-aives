@@ -15,6 +15,14 @@ class ExamSessionController {
     }
   };
 
+  getMonitoring = async (req, res, next) => {
+    try {
+      res.json(await this.examSessionService.getInterviewCounts({ user: req.user }));
+    } catch (error) {
+      next(error);
+    }
+  };
+
   list = async (req, res, next) => {
     try {
       const sessions = await this.examSessionService.listSessions({ user: req.user });

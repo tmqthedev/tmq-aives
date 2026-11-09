@@ -7,6 +7,7 @@ import {
   listQuestions,
   createQuestion,
   updateQuestion,
+  getQuestionRevision, saveQuestionRevision, publishQuestionRevision, discardQuestionRevision,
   deleteQuestion,
   approveQuestion,
   rejectQuestion,
@@ -18,6 +19,7 @@ import { listMaterials, listTopics } from '../../services/materialApi';
 import { createGenerationJob, getGenerationJob } from '../../services/questionGenerationApi';
 import { approveBatch } from '../../services/reviewApi';
 import { listRubrics } from '../../services/rubricApi';
+import { useBusinessEvents } from '../../hooks/useBusinessEvents';
 
 const STATUS_OPTIONS = ['DRAFT', 'PENDING_REVIEW', 'APPROVED', 'REJECTED', 'ARCHIVED'];
 const BLOOM_OPTIONS = ['REMEMBER', 'UNDERSTAND', 'APPLY', 'ANALYZE'];
@@ -51,6 +53,16 @@ const STATUS_BADGE = {
   DRAFT: 'badge-info',
 };
 
+function incompleteApprovalMessage(error) {
+  const missing = String(error?.details?.message || error?.message || '').match(/missing ([^.]+)/i)?.[1]
+    ?.split(',').map((field) => field.trim()) || [];
+  const labels = { referenceAnswer: t('Reference Answer'), keyPoints: t('Key Points'), rubricId: t('Rubric') };
+  const fields = missing.map((field) => labels[field]).filter(Boolean);
+  return fields.length > 0
+    ? t('Missing before approval: {v0}.', { v0: fields.join(', ') })
+    : t('A reference answer, key points and rubric are required before approval.');
+}
+
 // Rubric label: its name when set, else id + criteria; always the max score.
 function rubricLabel(r) {
   if (r.name) return `${r.name} (max ${r.maxScore})`;
@@ -70,6 +82,31 @@ const emptyForm = {
   purpose: '',
 };
 
+function formFieldsForQuestion(q) {
+  return {
+    topicId: q.topicId != null ? String(q.topicId) : '',
+    rubricId: q.rubricId != null ? String(q.rubricId) : '',
+    content: q.content || '',
+    status: q.status || 'DRAFT',
+    bloomLevel: q.bloomLevel || 'REMEMBER',
+    language: String(q.language || 'en').toLowerCase().startsWith('vi') ? 'vi' : 'en',
+    referenceAnswer: q.referenceAnswer || '',
+    keyPoints: Array.isArray(q.keyPoints) ? q.keyPoints.join(' | ') : '',
+    purpose: q.purpose || '',
+  };
+}
+
+function revisionFields(values) {
+  return {
+    content: String(values.content || '').trim(),
+    referenceAnswer: String(values.referenceAnswer || '').trim(),
+    keyPoints: Array.isArray(values.keyPoints) ? values.keyPoints : String(values.keyPoints || '').split('|').map(p => p.trim()).filter(Boolean),
+    rubricId: values.rubricId ? Number(values.rubricId) : null,
+    bloomLevel: values.bloomLevel || null,
+    language: String(values.language || 'en').toLowerCase(),
+  };
+}
+
 export default function LecturerQuestions() {
   useLocale();
   const [questions, setQuestions] = useState([]);
@@ -81,6 +118,15 @@ export default function LecturerQuestions() {
   const [formError, setFormError] = useState('');
   const [formTopics, setFormTopics] = useState([]);
   const [formRubrics, setFormRubrics] = useState([]);
+  const [pendingRevision, setPendingRevision] = useState(null);
+  const [revisionLoading, setRevisionLoading] = useState(false);
+  const [revisionReady, setRevisionReady] = useState(false);
+  const [revisionBusy, setRevisionBusy] = useState(false);
+  const [formNotice, setFormNotice] = useState('');
+  const revisionRequestRef = useRef(0);
+  const isRevision = currentQuestion?.status === 'APPROVED';
+  const revisionDirty = !pendingRevision || JSON.stringify(revisionFields(formData)) !== JSON.stringify(revisionFields(pendingRevision.content));
+
 
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -124,31 +170,39 @@ export default function LecturerQuestions() {
     load();
   }, [load]);
 
+  // Question writes (this tab, other lecturers, generation jobs) refetch the list.
+  useBusinessEvents(['question'], () => { load(); });
+
   const handleOpenModal = async (q = null) => {
+    const requestId = ++revisionRequestRef.current;
+    setPendingRevision(null);
+    setRevisionLoading(q?.status === 'APPROVED');
+    setRevisionReady(false);
+    setFormNotice('');
+
     setCurrentQuestion(q);
-    setFormData(
-      q
-        ? {
-            topicId: q.topicId != null ? String(q.topicId) : '',
-            rubricId: q.rubricId != null ? String(q.rubricId) : '',
-            content: q.content || '',
-            status: q.status || 'DRAFT',
-            bloomLevel: q.bloomLevel || 'REMEMBER',
-            language: String(q.language || 'en').toLowerCase().startsWith('vi') ? 'vi' : 'en',
-            referenceAnswer: q.referenceAnswer || '',
-            keyPoints: Array.isArray(q.keyPoints) ? q.keyPoints.join(' | ') : '',
-            purpose: q.purpose || '',
-          }
-        : emptyForm
-    );
+    setFormData(q ? formFieldsForQuestion(q) : emptyForm);
     setFormError('');
     setIsModalOpen(true);
     try {
-      const [topics, rubrics] = await Promise.all([listTopics(), listRubrics()]);
+      const [topics, rubrics, revision] = await Promise.all([
+        listTopics(), listRubrics(), q?.status === 'APPROVED' ? getQuestionRevision(q.id) : Promise.resolve(null),
+      ]);
+      if (requestId !== revisionRequestRef.current) return;
       setFormTopics(Array.isArray(topics) ? topics : []);
       setFormRubrics(Array.isArray(rubrics) ? rubrics : []);
+      setPendingRevision(revision);
+      if (revision) setFormData(prev => ({ ...prev, ...revision.content,
+        rubricId: revision.content.rubricId != null ? String(revision.content.rubricId) : '',
+        language: String(revision.content.language || 'en').toLowerCase(),
+        bloomLevel: revision.content.bloomLevel || 'REMEMBER',
+        keyPoints: (revision.content.keyPoints || []).join(' | '),
+      }));
+      setRevisionReady(true);
     } catch {
-      setFormError(t("Could not load topics."));
+      if (requestId === revisionRequestRef.current) setFormError(t('Could not load the question editor. Close and reopen it to retry.'));
+    } finally {
+      if (requestId === revisionRequestRef.current) setRevisionLoading(false);
     }
   };
 
@@ -185,20 +239,80 @@ export default function LecturerQuestions() {
     };
 
     try {
+      if (isRevision) {
+        if (!revisionReady || revisionBusy) return;
+        setRevisionBusy(true);
+        const revision = await saveQuestionRevision(currentQuestion.id, {
+          patch: revisionFields(formData), expectedVersion: pendingRevision?.version ?? 0,
+          revisionId: pendingRevision?.id,
+        });
+        setPendingRevision(revision);
+        setFormError('');
+        setFormNotice(t('Pending revision saved. Review it before publishing.'));
+        return;
+      }
       if (currentQuestion) {
         await updateQuestion(currentQuestion.id, payload);
       } else {
         await createQuestion(payload);
       }
       setIsModalOpen(false);
-      setNotice('');
+      setNotice(t('Question saved. Review its answer, key points and rubric before approving.'));
       await load();
     } catch (err) {
-      if (err.code === 'DUPLICATE_QUESTION') {
+      if (err.code === 'REVISION_CONFLICT') {
+        setFormError(t('This revision changed. Close and reopen the editor before reviewing it again.'));
+      } else if (err.code === 'DUPLICATE_QUESTION') {
         setFormError(t("This question already exists."));
       } else {
         setFormError(err.message || t("Failed to save question."));
       }
+    } finally {
+      setRevisionBusy(false);
+    }
+  };
+
+  const handlePublishRevision = async () => {
+    if (!pendingRevision || revisionDirty || revisionBusy || !revisionReady) return;
+    if (!confirm(t('Publish this revision after reviewing its question, reference answer, key points and rubric? Existing interviews keep their original knowledge.'))) return;
+    setRevisionBusy(true);
+    setFormError('');
+    try {
+      await publishQuestionRevision(currentQuestion.id, {
+        revisionId: pendingRevision.id, expectedVersion: pendingRevision.version,
+      });
+      setIsModalOpen(false);
+      setNotice(t('Reviewed revision published. New interviews will use the approved version.'));
+      await load();
+    } catch (err) {
+      setFormError(err.code === 'REVISION_CONFLICT'
+        ? t('This revision changed. Close and reopen the editor before reviewing it again.')
+        : err.code === 'QUESTION_INCOMPLETE' ? incompleteApprovalMessage(err)
+          : err.message || t('Could not publish the revision.'));
+    } finally {
+      setRevisionBusy(false);
+    }
+  };
+
+  const handleDiscardRevision = async () => {
+    if (!pendingRevision || revisionBusy || !revisionReady) return;
+    if (!confirm(t('Discard this pending revision? The approved question stays unchanged and the draft cannot be restored.'))) return;
+    setRevisionBusy(true);
+    setFormError('');
+    try {
+      await discardQuestionRevision(currentQuestion.id, {
+        revisionId: pendingRevision.id, expectedVersion: pendingRevision.version,
+      });
+      setPendingRevision(null);
+      setFormData(formFieldsForQuestion(currentQuestion));
+      setFormNotice(t('Pending revision discarded. The form now shows the approved version.'));
+      await load();
+    } catch (err) {
+      setFormError(err.code === 'REVISION_CONFLICT'
+        ? t('This revision changed. Close and reopen the editor before reviewing it again.')
+        : err.message || t('Could not discard the revision.'));
+    } finally {
+      setRevisionBusy(false);
     }
   };
 
@@ -248,7 +362,11 @@ export default function LecturerQuestions() {
       setApproveTarget(null);
       await load();
     } catch (err) {
-      setApproveError(err.message || t("Could not approve the question."));
+      if (err.code === 'QUESTION_INCOMPLETE') {
+        setApproveError(incompleteApprovalMessage(err));
+      } else {
+        setApproveError(err.message || t("Could not approve the question."));
+      }
     } finally {
       setApproving(false);
     }
@@ -268,6 +386,8 @@ export default function LecturerQuestions() {
     } catch (err) {
       if (err.code === 'RUBRIC_REQUIRED') {
         setError(t("A rubric must be attached before this question can be approved."));
+      } else if (err.code === 'QUESTION_INCOMPLETE') {
+        setError(incompleteApprovalMessage(err));
       } else if (err.code === 'INVALID_TRANSITION') {
         setError(t("This question cannot be approved from its current status."));
       } else {
@@ -321,7 +441,7 @@ export default function LecturerQuestions() {
     setImporting(true);
     try {
       const data = await importQuestions(file);
-      setNotice(t("Imported {v0} question(s).", {v0: data.created?.length ?? 0}));
+      setNotice(t("Imported {v0} question(s) for lecturer review.", {v0: data.created?.length ?? 0}));
       await load();
     } catch (err) {
       if (err.status === 422 && Array.isArray(err.details?.errors)) {
@@ -629,8 +749,20 @@ export default function LecturerQuestions() {
         </table>
       </div>
 
-      <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} title={currentQuestion ? t("Edit Question") : t("Create Question")}>
+      <Modal isOpen={isModalOpen} onClose={() => { if (!revisionBusy) setIsModalOpen(false); }} title={isRevision ? t("Review pending revision") : currentQuestion ? t("Edit Question") : t("Create Question")}>
         <div className="modal-body">
+          {isRevision && <p>{t('Edits are saved as a pending revision. The active approved question remains available until you publish. Changes to topics and purpose require a separate question.')}</p>}
+          {revisionLoading && <p role="status">{t('Loading pending revision...')}</p>}
+          {formNotice && <p role="status">{formNotice}</p>}
+          {isRevision && <details style={{ marginBottom: '1rem' }}>
+            <summary>{t('Active approved version')}</summary>
+            <p>{currentQuestion.content}</p>
+            <p><strong>{t('Reference Answer')}: </strong>{currentQuestion.referenceAnswer}</p>
+            <p><strong>{t('Key Points')}: </strong>{currentQuestion.keyPoints?.join(' | ')}</p>
+            <p><strong>{t('Rubric')}: </strong>{currentQuestion.rubricId}</p>
+          </details>}
+          <fieldset onChangeCapture={() => setFormNotice('')} disabled={revisionLoading || revisionBusy || (isRevision && !revisionReady)} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+          {!currentQuestion && <p style={{ color: 'var(--text-muted)', marginBottom: '1rem' }}>{t('Saving a question does not approve it. A lecturer must review its answer, key points and rubric.')}</p>}
           {formError && (
             <div style={{ backgroundColor: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', padding: '0.75rem', borderRadius: '0.5rem', marginBottom: '1rem', fontSize: '0.875rem', border: '1px solid rgba(239, 68, 68, 0.2)' }}>
               {translateMessage(formError)}
@@ -641,6 +773,7 @@ export default function LecturerQuestions() {
             <select
               className="form-select"
               value={formData.topicId}
+              disabled={isRevision}
               onChange={(e) => setFormData({ ...formData, topicId: e.target.value, rubricId: '' })}
             >
               <option value="">{t("Select a topic")}</option>
@@ -721,6 +854,7 @@ export default function LecturerQuestions() {
               type="text"
               className="form-input"
               value={formData.purpose}
+              disabled={isRevision}
               onChange={(e) => setFormData({ ...formData, purpose: e.target.value })}
               placeholder={t("Why this question is asked...")}
             />
@@ -730,23 +864,48 @@ export default function LecturerQuestions() {
             <select
               className="form-select"
               value={formData.status}
+              disabled={isRevision}
               onChange={(e) => setFormData({ ...formData, status: e.target.value })}
             >
-              {STATUS_OPTIONS.map((s) => (
+              {(currentQuestion ? STATUS_OPTIONS : ['DRAFT', 'PENDING_REVIEW']).map((s) => (
                 <option key={s} value={s}>{enumLabel(s)}</option>
               ))}
             </select>
           </div>
+          </fieldset>
         </div>
         <div className="modal-footer">
-          <button className="btn btn-secondary" onClick={() => setIsModalOpen(false)}>{t("Cancel")}</button>
-          <button className="btn btn-primary" onClick={handleSave}>{t("Save")}</button>
+          <button className="btn btn-secondary" disabled={revisionBusy} onClick={() => setIsModalOpen(false)}>{t("Cancel")}</button>
+          <button className="btn btn-primary" onClick={handleSave} disabled={revisionBusy || revisionLoading || (isRevision && !revisionReady)}>{isRevision ? t('Save pending revision') : t("Save")}</button>
+          {isRevision && <button className="btn btn-primary" onClick={handlePublishRevision}
+            disabled={revisionBusy || revisionLoading || !revisionReady || !pendingRevision || revisionDirty}>
+            {t('Review and publish revision')}
+          </button>}
+          {isRevision && pendingRevision && <button className="btn btn-secondary" onClick={handleDiscardRevision}
+            disabled={revisionBusy || revisionLoading || !revisionReady}>
+            {t('Discard pending revision')}
+          </button>}
+          {isRevision && pendingRevision && revisionDirty && <span>{t('Save your changes before publishing.')}</span>}
         </div>
       </Modal>
 
       <Modal isOpen={approveTarget != null} onClose={() => setApproveTarget(null)} title={t("Attach a rubric and approve")}>
         <div className="modal-body">
           <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem', marginBottom: '1rem' }}>{t("This question has no rubric yet. A rubric is required before it can be approved.")}</p>
+          {approveTarget && (!approveTarget.referenceAnswer?.trim() || !approveTarget.keyPoints?.some((point) => String(point).trim())) && (
+            <div className="feedback feedback-warning" style={{ marginBottom: '1rem' }}>
+              <p>{t('Add the missing answer information before approval:')}</p>
+              <ul>
+                {!approveTarget.referenceAnswer?.trim() && <li>{t('Reference Answer')}</li>}
+                {!approveTarget.keyPoints?.some((point) => String(point).trim()) && <li>{t('Key Points')}</li>}
+              </ul>
+              <button className="btn btn-secondary" onClick={() => {
+                const target = approveTarget;
+                setApproveTarget(null);
+                handleOpenModal(target);
+              }}>{t('Edit Question')}</button>
+            </div>
+          )}
           {approveError && (
             <div style={{ backgroundColor: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', padding: '0.75rem', borderRadius: '0.5rem', marginBottom: '1rem', fontSize: '0.875rem', border: '1px solid rgba(239, 68, 68, 0.2)' }}>
               {translateMessage(approveError)}
@@ -767,7 +926,7 @@ export default function LecturerQuestions() {
         </div>
         <div className="modal-footer">
           <button className="btn btn-secondary" onClick={() => setApproveTarget(null)}>{t("Cancel")}</button>
-          <button className="btn btn-primary" onClick={handleApproveWithRubric} disabled={approving || !approveRubricId}>{t("Approve")}</button>
+          <button className="btn btn-primary" onClick={handleApproveWithRubric} disabled={approving || !approveRubricId || !approveTarget?.referenceAnswer?.trim() || !approveTarget?.keyPoints?.some((point) => String(point).trim())}>{t("Approve")}</button>
         </div>
       </Modal>
 

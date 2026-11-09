@@ -1,6 +1,24 @@
 # AGENTS.md
 
-This file provides guidelines and architectural context for Antigravity AI agents working in this repository (`swd392_team7_product`).
+This file is the working contract for every coding agent in `swd392_team7_product`. Read it before editing. The user's current instructions and an approved task plan take precedence over this file; use the code and migrations to verify facts that can change.
+
+## How to work in this repo
+
+1. State the task boundary and inspect the affected route, controller, service, repository, UI, and tests before editing. Do not infer production behavior from a mock test.
+2. Keep unrelated edits intact. Use an isolated worktree for overlapping tasks; do not commit secrets, generated plans, audio recordings, or personal data.
+3. Preserve the architecture and security invariants in Section 4. Add a numbered migration for schema changes; never rewrite an applied migration.
+4. Run the package-local checks in Section 3. Report exactly which checks passed, failed, or were skipped, and distinguish local results from unobserved staging or production behavior.
+5. If an external coding agent is used, give it a bounded file and feature scope. The coordinating agent reviews its diff, tests, privacy boundaries, and integration before accepting the work.
+
+### Approved upgrade contract (2026-11-08)
+
+These are requirements for the current realtime, audio, transcript, and grading upgrade; do not describe them as shipped until implementation and verification finish.
+
+- Realtime covers business changes for `ADMIN`, `LECTURER`, and `STUDENT`: users/subjects, materials, questions/rubrics, exams, interviews, and results. Enforce the same ownership and subject scope as REST. Broadcast only safe invalidation/status data after successful writes, resync on reconnect, and target about two seconds between connected browsers. Admin/lecturer exam monitoring shows aggregate counts, not live answer content.
+- Check microphone before creating an interview so the exam timer begins only after a valid voice signal and the student's start action. Let students select supported devices, adjust in-app microphone gain and AI playback volume, inspect the level, and test playback. Microphone readiness is required; speaker failure is a warning because questions remain visible as text.
+- Show the known TTS question text with playback status. Do not transcribe TTS audio. Do not show student speech text while recording. After submission, send the server STT result as soon as it is stored, before follow-up processing finishes. Keep a read-only, student-owned question/answer history during and after the interview. Let students flag STT errors for lecturer audio review without changing the original audio or transcript.
+- Every newly created or imported question requires explicit lecturer approval with a nonempty reference answer, key points, and rubric. Existing approved questions with complete data remain usable and are marked as legacy; incomplete ones return to review and cannot be selected. Scheduling/opening checks the eligible bank size and Bloom quotas. Edits to approved grading content create a pending revision while the approved version remains in use. Each new interview snapshots the approved version at start; follow-ups, grading, and regrading use that snapshot.
+- Approved reference answer and key points define creditable content; rubric defines the score scale; uploaded materials provide context. Unsupported AI evidence is flagged for lecturer review. Existing started interviews are not retroactively changed; legacy items without a complete reference require manual review. Grading progress visible to authorized lecturers/admins shows stage and question index, survives reload, and reveals scores only when the whole grading job finishes. Lecturer approval remains the final grade decision.
 
 ---
 
@@ -44,7 +62,7 @@ swd392_team7_product/
 │   │   ├── realtime/          # Socket.IO /interview namespace
 │   │   ├── cli/               # createAdmin, verifyRealAi
 │   │   └── tts/               # TTS adapter (Kokoro Lambda / Google / mock)
-│   ├── db/migrations/         # Numbered SQL migration files (001_baseline.sql … 023_*.sql)
+│   ├── db/migrations/         # Numbered SQL migrations; inspect the latest number before adding one
 │   └── test/                  # Test suites (unit & e2e) + helpers/
 ├── frontend/                  # React 19 + Vite SPA (ESM, JSX, Tailwind/Vanilla CSS)
 │   ├── src/
@@ -159,7 +177,7 @@ Code MUST NOT branch on environment names (`process.env.NODE_ENV === 'local'`). 
   2. Empty answer -> Move to next main question.
   3. LLM proposes valid follow-up AND follow-up limit not reached -> Ask follow-up question.
   4. Otherwise -> Move to next main question (if none remain -> End interview).
-- **Student Safety & Privacy**: Never return internal DB rows or rationale to students. Every response MUST pass through `toStudentInterviewView()` and `assertStudentSafe()`. Rationale and citations are strictly lecturer-facing.
+- **Student Safety & Privacy**: Never return internal DB rows, reference answers, key points, or rationale to students. Interview state must pass through `toStudentInterviewView()` and `assertStudentSafe()`. A student transcript endpoint needs its own explicit allowlist and ownership check; do not weaken the existing state guard. Rationale and citations are strictly lecturer-facing.
 
 ---
 
@@ -178,3 +196,4 @@ Code MUST NOT branch on environment names (`process.env.NODE_ENV === 'local'`). 
 4. **Git & Workspace Management**:
    - Worktrees are placed in `.worktrees/` (ignored by git).
    - Never commit `.env` or plaintext credentials.
+   - Before reporting completion, review `git diff --check`, the changed-file list, and any skipped checks. Do not claim a real-AI, Docker, staging, or production result unless that exact environment was exercised.

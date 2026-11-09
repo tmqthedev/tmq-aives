@@ -1,3 +1,4 @@
+const { readInterviewQuestion } = require('../interview/knowledgeSnapshot');
 // Interview engine (Step 6): runs one student's viva from start to completion.
 // ENGINE ONLY: no REST routes and no Socket.IO here; Step 7 wires these public
 // methods to the transport. Every public method returns ONLY the student-safe
@@ -27,6 +28,7 @@ const {
   buildMainRationale, buildFollowUpRationale, toStringArray, criterionNames,
 } = require('../interview/rationaleBuilder');
 const { toStudentInterviewView, assertStudentSafe } = require('../interview/studentView');
+const { toStudentTranscriptView } = require('../interview/studentTranscriptView');
 const {
   ACTIVE_INTERVIEW_STATUSES, ACTIVE_TURN_STATUSES, END_REASONS,
 } = require('../domain/interviewStatus');
@@ -34,8 +36,12 @@ const {
 const DEFAULT_SESSION_TIME_LIMIT_SEC = 1800;
 const DEFAULT_MAIN_QUESTION_COUNT = 3;
 const DEFAULT_ANSWER_TIME_LIMIT_SEC = 120;
+const DEFAULT_TURN_PROCESSING_STALE_SEC = 180;
 const MAX_FAILURE_MESSAGE = 500;
 const MIN_AUDIO_BYTES = 64;
+
+// Turn statuses that mean the student still has an open question.
+const OPEN_TURN_STATUSES = ['ASKED', 'ANSWERING', 'PROCESSING'];
 
 const AUDIO_EXTENSIONS = {
   'audio/webm': 'webm',
@@ -113,10 +119,12 @@ class InterviewService {
     awsClients,
     enqueueJob,
     env = {},
+    realtimeBus = null,
     clock = () => new Date(),
     random = Math.random,
     logger = console,
   } = {}) {
+    this.realtimeBus = realtimeBus;
     this.db = db;
     this.examSessionRepository = examSessionRepository;
     this.vivaInterviewRepository = vivaInterviewRepository;
@@ -198,14 +206,63 @@ class InterviewService {
         // call is normally a cache hit.
         await this._lockExam(examId, tx);
         const pickedIds = await this._pickMainQuestions(exam, bank, required, tx);
+        const lockedQuestions = new Map();
+        // Global lock order avoids cross-exam starts taking the same question
+        // and rubric locks in opposite random picker order.
+        for (const qid of [...pickedIds].sort((a, b) => Number(a) - Number(b))) {
+          const question = await this.questionRepository.findByIdForUpdate(qid, tx);
+          let points = question?.key_points;
+          if (typeof points === 'string') {
+            try { points = JSON.parse(points); } catch { points = null; }
+          }
+          if (!question || question.status !== 'APPROVED'
+            || typeof question.reference_answer !== 'string' || !question.reference_answer.trim()
+            || !Array.isArray(points) || !points.some((point) => typeof point === 'string' && point.trim())
+            || question.rubric_id == null) {
+            throw httpError(409, 'QUESTION_INCOMPLETE', 'A selected approved question changed; retry after bank review.');
+          }
+          const selected = bank.find(q => Number(q.question_id) === Number(qid));
+          if (Number(question.topic_id) !== Number(exam.topic_id)
+            || examLanguageOf(question) !== String(exam.language).toUpperCase()
+            || (selected?.bloom_level ?? null) !== (question.bloom_level ?? null)) {
+            throw httpError(409, 'QUESTION_BANK_CHANGED', 'The selected bank changed; retry the interview start.');
+          }
+          lockedQuestions.set(qid, { ...question, key_points: points });
+        }
+        const rubricIds = [...new Set([...lockedQuestions.values()].map(q => Number(q.rubric_id)))].sort((a, b) => a - b);
+        for (const rubricId of rubricIds) await this.rubricRepository.setLocked(rubricId, true, tx);
         const questions = [];
         for (const qid of pickedIds) {
-          // eslint-disable-next-line no-await-in-loop
-          questions.push(await this.questionRepository.findById(qid));
+          const question = lockedQuestions.get(qid);
+          const material = await this._loadQuestionMaterial(question, tx);
+          if (!material.rubric || !Array.isArray(material.rubric.criteria) || material.rubric.criteria.length === 0) {
+            throw httpError(409, 'QUESTION_INCOMPLETE', 'A selected question has no grading rubric criteria.');
+          }
+          const rubric = material.rubric;
+          questions.push(JSON.parse(JSON.stringify({
+            snapshot_version: 1, question_id: question.question_id,
+            content_version: question.content_version, topic_id: question.topic_id,
+            content: question.content, bloom_level: question.bloom_level,
+            language: question.language, source: question.source,
+            reference_answer: question.reference_answer, key_points: question.key_points,
+            rubric_id: question.rubric_id, rationale: question.rationale,
+            rubric_snapshot: {
+              rubric_id: rubric.rubric_id, version: rubric.version, max_score: rubric.max_score,
+              criteria: rubric.criteria.map(c => ({
+                rubric_criterion_id: c.rubric_criterion_id, criterion_name: c.criterion_name,
+                weight_percent: c.weight_percent, description: c.description, order_index: c.order_index,
+                performance_levels: (c.performance_levels || []).map(l => ({
+                  performance_level_id: l.performance_level_id, label: l.label,
+                  min_score: l.min_score, max_score: l.max_score, description: l.description, order_no: l.order_no,
+                })),
+              })),
+            },
+            source_refs_snapshot: material.sourceRefs.map(ref => ({
+              chunkId: ref.chunkId, excerpt: ref.excerpt, materialTitle: ref.materialTitle,
+              location: ref.location, content: ref.content,
+            })),
+          })));
         }
-        const rubricIds = [...new Set(questions
-          .map((q) => (q && q.rubric_id != null ? Number(q.rubric_id) : null))
-          .filter((id) => id != null))];
 
         const first = await this._prepareMainTurn(questions[0], exam);
         // Final gate: slow preparation (TTS) must not create an already-expired
@@ -223,13 +280,7 @@ class InterviewService {
           clientIp: clientIp ?? null,
         }, tx);
         const interviewId = interview.viva_interview_id;
-        const assigned = await this.assignedQuestionRepository.createMany(interviewId, pickedIds, tx);
-        // Lock the rubric of every assigned question (idempotent) so it cannot
-        // change while this student is being examined on it.
-        for (const rubricId of rubricIds) {
-          // eslint-disable-next-line no-await-in-loop
-          await this.rubricRepository.setLocked(rubricId, true, tx);
-        }
+        const assigned = await this.assignedQuestionRepository.createMany(interviewId, pickedIds, tx, questions);
         const turn = await this.qaTurnRepository.create({
           interviewId,
           assignedQuestionId: assigned[0].assigned_question_id,
@@ -268,7 +319,28 @@ class InterviewService {
       coveredKeyPoints: {},
       partialSegments: [],
     }));
+    await this._publishInterview(interview, 'created', exam);
     return this._buildView(interview, exam, { currentTurn: turn, totalQuestions: assigned.length });
+  }
+
+  // Invalidation only (ids + status). Runs after commit; never throws and
+  // never carries answer text. studentUserId is routing-only (stripped on the wire).
+  async _publishInterview(interview, action, knownExam = null) {
+    if (!this.realtimeBus || !interview) return;
+    try {
+      const examId = Number(interview.exam_session_id);
+      const exam = knownExam || await this.examSessionRepository.findById(examId);
+      this.realtimeBus.publish('interview', {
+        action,
+        interviewId: Number(interview.viva_interview_id),
+        examSessionId: examId,
+        subjectId: exam?.subject_id ?? null,
+        status: interview.status,
+        studentUserId: interview.student_id == null ? null : Number(interview.student_id),
+      });
+    } catch (err) {
+      this.logger?.warn?.({ err }, 'interview realtime publish failed');
+    }
   }
 
   async getCurrentState({ user, interviewId } = {}) {
@@ -406,35 +478,76 @@ class InterviewService {
   // a client transcript, or, when neither is given, the partial segments
   // collected so far. Then apply the decision order.
   async submitAnswer({
-    user, interviewId, turnId, audio, contentType, transcript, timedOut = false, signals,
+    user, interviewId, turnId, audio, contentType, transcript, timedOut = false, signals, onTranscribed,
   } = {}) {
     const { interview, exam } = await this._loadOwned(user, interviewId);
     // Already ended (e.g. lazily at the deadline): nothing is accepted.
     if (!this._isActive(interview)) return this._buildView(interview, exam);
-    const id = interview.viva_interview_id;
 
     const latest = await this._requireCurrentTurn(interview, turnId);
     if (Number(latest.retry_count) > 0 && this._deadlinePassed(interview.deadline_at)) {
       return this._buildView(await this._enforceDeadline(interview), exam);
     }
     const prevStatus = latest.status;
+    const claimedAt = this.clock();
     // Atomic claim: a second submit for the same turn loses here.
+    // processing_started_at lets the read paths detect a claim abandoned by a
+    // crashed request (TURN_PROCESSING_STALE_SEC).
     const claimed = await this.qaTurnRepository.transitionStatus(
       latest.qa_turn_id,
       ACTIVE_TURN_STATUSES,
       'PROCESSING',
+      { processing_started_at: claimedAt },
     );
     if (!claimed) {
       throw httpError(409, 'TURN_NOT_ACTIVE', 'This question has already been answered.');
     }
     const receivedAt = this.clock();
 
+    try {
+      return await this._processClaimedAnswer({
+        interview,
+        exam,
+        claimed,
+        prevStatus,
+        receivedAt,
+        audio,
+        contentType,
+        transcript,
+        timedOut,
+        signals,
+        onTranscribed,
+      });
+    } catch (err) {
+      // The turn never left PROCESSING: release it back to ANSWERING instead of
+      // leaving every resubmit at 409 TURN_NOT_ACTIVE. `null` means another
+      // path already moved it on (e.g. the intentional STT_FAILED release), so
+      // the original error is surfaced. A failed revert still ends in 503; the
+      // read-path stale-claim recovery will release the turn later.
+      const released = await this._releaseProcessingTurnSafely(interview, exam, claimed, { error: err });
+      if (released === null) throw err;
+      throw httpError(
+        503,
+        'TURN_PROCESSING_FAILED',
+        'Could not process the answer; please answer again.',
+      );
+    }
+  }
+
+  // Everything after the turn claim: resolve the answer text, persist it and
+  // apply the decision order. Extracted so submitAnswer can release the turn
+  // when any step fails unexpectedly.
+  async _processClaimedAnswer({
+    interview, exam, claimed, prevStatus, receivedAt,
+    audio, contentType, transcript, timedOut, signals, onTranscribed,
+  }) {
+    const id = interview.viva_interview_id;
     const ctx = await this._ensureContext(interview, claimed);
     const assigned = await this.assignedQuestionRepository.listByInterview(id);
     const assignedRow = assigned.find(
       (a) => String(a.assigned_question_id) === String(claimed.assigned_question_id),
     );
-    const question = assignedRow ? await this.questionRepository.findById(assignedRow.question_id) : null;
+    const question = readInterviewQuestion(assignedRow);
     const keyPoints = toStringArray(question && question.key_points);
 
     // --- Resolve the answer text -------------------------------------------
@@ -574,12 +687,16 @@ class InterviewService {
     const timedOutFinal = timedOut === true
       || (answerDeadlineMs != null && receivedAt.getTime() >= answerDeadlineMs);
 
-    await this.qaTurnRepository.update(claimed.qa_turn_id, {
+    const answeredTurn = await this.qaTurnRepository.update(claimed.qa_turn_id, {
       status: 'ANSWERED',
       answer_text: answerText,
       answer_audio_key: answerAudioKey,
       transcript_confidence: clampConfidence(stt && stt.confidence),
       answer_ended_at: receivedAt,
+      // Restart the claim clock: the decision phase (follow-up LLM + TTS)
+      // starts now, and read-path recovery must measure its staleness from
+      // here, not from receivedAt (STT alone can take minutes).
+      processing_started_at: this.clock(),
       timed_out: timedOutFinal,
       response_latency_ms: signals?.responseLatencyMs ?? signals?.response_latency_ms,
       speech_duration_ms: signals?.speechDurationMs ?? signals?.speech_duration_ms,
@@ -587,6 +704,24 @@ class InterviewService {
       pause_count: signals?.pause_count ?? signals?.pauseCount,
     });
     await this._safeContext(() => this.sessionContextStore.clearPartialSegments(id));
+
+    // Hand the recognized answer to the transport as soon as it is persisted,
+    // BEFORE the follow-up LLM decision and next-turn TTS. A slow or failing
+    // provider must never delay or suppress it, so the callback is optional and
+    // its failures are swallowed here.
+    if (typeof onTranscribed === 'function') {
+      const persisted = answeredTurn || claimed;
+      try {
+        onTranscribed({
+          interviewId: id,
+          turnId: persisted.qa_turn_id,
+          sequenceNo: persisted.sequence_no,
+          transcript: answeredTurn ? (answeredTurn.answer_text ?? null) : answerText,
+        });
+      } catch (err) {
+        this.logger.warn({ err, interviewId: id }, 'onTranscribed callback failed');
+      }
+    }
 
     // --- Decision ------------------------------------------------------------
     const followUpsUsed = Number(interview.current_follow_up_count) || 0;
@@ -603,6 +738,7 @@ class InterviewService {
 
     let llmDecision;
     if (receivedAt.getTime() < deadlineMs
+      && question.snapshot_version === 1
       && shouldConsultLlm({ answerText, ...caps })) {
       llmDecision = await this._decideWithRetry({
         input: {
@@ -689,44 +825,14 @@ class InterviewService {
         }
       }
     } else {
-      const index = Number(interview.current_question_index) || 0;
-      const next = assigned.find((a) => Number(a.order_no) === index + 2);
-      const nextQuestion = next ? await this.questionRepository.findById(next.question_id) : null;
-      const prepared = next ? await this._prepareMainTurn(nextQuestion, exam) : null;
-      if (!next) {
-        current = await this._endInterview(interview, END_REASONS.QUESTIONS_EXHAUSTED);
-      } else if (this._deadlinePassed(interview.deadline_at)) {
-        // Final gate: preparation latency must not create a turn past the
-        // deadline; the prepared main question is discarded.
-        current = await this._endInterview(interview, END_REASONS.DEADLINE_REACHED);
-      } else {
-        const result = await this._run(async (tx) => {
-          const turn = await this.qaTurnRepository.create({
-            interviewId: id,
-            assignedQuestionId: next.assigned_question_id,
-            sequenceNo: (Number(claimed.sequence_no) || 0) + 1,
-            turnType: 'MAIN',
-            questionText: prepared.question.content,
-            rationale: prepared.rationale,
-            status: 'ASKED',
-            questionAudioKey: prepared.audioKey,
-            askedAt: this.clock(),
-          }, tx);
-          await this.assignedQuestionRepository.markAsked(next.assigned_question_id, tx);
-          const updated = await this.vivaInterviewRepository.updateProgress(id, {
-            current_question_index: index + 1,
-            current_follow_up_count: 0,
-          }, tx);
-          return { turn, updated };
-        });
-        current = result.updated;
-        currentTurn = result.turn;
-        if (prepared.ttsError) {
-          await this._recordFailure({
-            interviewId: id, turnId: currentTurn.qa_turn_id, stage: 'TTS', error: prepared.ttsError,
-          });
-        }
-      }
+      const advanced = await this._advanceToNextMainQuestion({
+        interview,
+        exam,
+        assigned,
+        sequenceNo: (Number(claimed.sequence_no) || 0) + 1,
+      });
+      current = advanced.interview;
+      currentTurn = advanced.turn;
     }
 
     if (this._isActive(current)) {
@@ -739,6 +845,70 @@ class InterviewService {
       await this._safeContext(() => this.sessionContextStore.update(id, { coveredKeyPoints }));
     }
     return this._buildView(current, exam, { currentTurn, totalQuestions: assigned.length });
+  }
+
+  // Student-owned question/answer history. Available during and after the
+  // interview; only answered turns plus the current asked question.
+  async getTranscript({ user, interviewId } = {}) {
+    const { interview } = await this._loadOwned(user, interviewId);
+    const turns = await this.qaTurnRepository.listByInterview(interview.viva_interview_id);
+    return assertStudentSafe(
+      toStudentTranscriptView({ interview, turns }),
+      { allowedKeys: ['transcript'] },
+    );
+  }
+
+  // The recognized answer text of one of the student's own answered turns, for
+  // the `turn:transcribed` event and the REST answer response. Returns null
+  // when the turn has not been answered yet (e.g. an empty-audio retry).
+  async getTranscribedTurn({ user, interviewId, turnId } = {}) {
+    const { interview } = await this._loadOwned(user, interviewId);
+    const id = this._parseId(turnId, 'turn id');
+    const turn = await this.qaTurnRepository.findById(id);
+    if (!turn || String(turn.interview_id) !== String(interview.viva_interview_id)) {
+      throw httpError(404, 'TURN_NOT_FOUND', 'Turn not found.');
+    }
+    if (turn.status !== 'ANSWERED') return null;
+    return {
+      interviewId: interview.viva_interview_id,
+      turnId: turn.qa_turn_id,
+      sequenceNo: turn.sequence_no,
+      transcript: turn.answer_text ?? null,
+    };
+  }
+
+  // Let a student flag a mis-recognized answer so the examiner replays the
+  // audio. Allowed during the interview and after completion until the result
+  // is FINALIZED. Idempotent: a second call updates the note.
+  async disputeStt({ user, interviewId, turnId, note = null } = {}) {
+    const { interview, exam } = await this._loadOwned(user, interviewId);
+    const id = this._parseId(turnId, 'turn id');
+    const turn = await this.qaTurnRepository.findById(id);
+    if (!turn || String(turn.interview_id) !== String(interview.viva_interview_id)) {
+      throw httpError(404, 'TURN_NOT_FOUND', 'Turn not found.');
+    }
+    if (turn.status !== 'ANSWERED') {
+      throw httpError(409, 'TURN_NOT_ANSWERED', 'Only answered turns can be disputed.');
+    }
+    const result = await this.vivaResultRepository.findByInterviewId(interview.viva_interview_id);
+    if (result && result.status === 'FINALIZED') {
+      throw httpError(409, 'RESULT_FINALIZED', 'The result is finalized; STT disputes are no longer accepted.');
+    }
+    const rawNote = note == null ? null : String(note);
+    if (rawNote != null && rawNote.length > 500) {
+      throw httpError(400, 'VALIDATION_ERROR', 'Dispute note must be at most 500 characters.');
+    }
+    const noteText = rawNote == null ? null : (rawNote.trim() || null);
+    const updated = await this.qaTurnRepository.update(turn.qa_turn_id, {
+      stt_disputed_at: this.clock(),
+      stt_dispute_note: noteText,
+    });
+    await this._publishInterview(interview, 'updated', exam);
+    return {
+      turnId: updated.qa_turn_id,
+      sttDisputed: true,
+      sttDisputeNote: updated.stt_dispute_note ?? null,
+    };
   }
 
   // =========================================================================
@@ -850,9 +1020,131 @@ class InterviewService {
   }
 
   async _resume(interview, exam) {
-    const current = await this._enforceDeadline(interview);
-    if (this._isActive(current)) await this._ensureContext(current);
+    let current = await this._enforceDeadline(interview);
+    if (this._isActive(current)) {
+      current = await this._recoverStuckState(current, exam);
+      if (this._isActive(current)) await this._ensureContext(current);
+    }
     return this._buildView(current, exam);
+  }
+
+  // Read-path crash recovery (defects A/B). A request can die after claiming a
+  // turn as PROCESSING (or after persisting ANSWERED but before creating the
+  // next turn), leaving every later read stuck. On the student's next read:
+  //   * a PROCESSING turn whose claim is older than TURN_PROCESSING_STALE_SEC
+  //     (or has no processing_started_at, legacy rows) is released to
+  //     ANSWERING exactly like the submitAnswer failure path;
+  //   * an active interview with no ASKED/ANSWERING/PROCESSING turn advances to
+  //     the next main question, or ends normally when none remains.
+  // Idempotent under concurrent reads: the release is a conditional transition
+  // and the next-turn insert is protected by (interview_id, sequence_no).
+  async _recoverStuckState(interview, exam) {
+    const id = interview.viva_interview_id;
+    let turns = await this.qaTurnRepository.listByInterview(id);
+    let latest = turns[turns.length - 1] || null;
+
+    if (latest && latest.status === 'PROCESSING' && this._isProcessingStale(latest)) {
+      const released = await this._releaseProcessingTurnSafely(interview, exam, latest, {
+        errorCode: 'STALE_PROCESSING',
+      });
+      if (released) {
+        latest = released;
+      } else {
+        // Another read released it (or moved it on) first.
+        turns = await this.qaTurnRepository.listByInterview(id);
+        latest = turns[turns.length - 1] || null;
+      }
+    }
+
+    if (!latest) return interview;
+    if (OPEN_TURN_STATUSES.includes(latest.status)) return interview;
+    if (turns.some((t) => OPEN_TURN_STATUSES.includes(t.status))) return interview;
+    // submitAnswer persists ANSWERED, then spends seconds on the follow-up
+    // decision before inserting the next turn. Advancing during that window
+    // would replace a follow-up with the next main question.
+    if (!this._isStaleSince(latest.processing_started_at || latest.answer_ended_at)) return interview;
+    if (this._deadlinePassed(interview.deadline_at)) {
+      return this._enforceDeadline(interview);
+    }
+
+    const assigned = await this.assignedQuestionRepository.listByInterview(id);
+    const advanced = await this._advanceToNextMainQuestion({
+      interview,
+      exam,
+      assigned,
+      sequenceNo: (Number(latest.sequence_no) || 0) + 1,
+    });
+    if (this._isActive(advanced.interview)) {
+      const ctx = await this._ensureContext(advanced.interview);
+      await this._safeContext(() => this.sessionContextStore.update(id, {
+        ...this._contextFromRows(advanced.interview, advanced.turn),
+        coveredKeyPoints: (ctx && ctx.coveredKeyPoints) || {},
+        partialSegments: [],
+      }));
+    }
+    return advanced.interview;
+  }
+
+  // A PROCESSING claim older than TURN_PROCESSING_STALE_SEC was abandoned by
+  // its request. Legacy rows (claimed before migration 036) have no timestamp
+  // and are treated as stale too.
+  _isProcessingStale(turn) {
+    return this._isStaleSince(turn.processing_started_at);
+  }
+
+  _isStaleSince(value) {
+    const startedMs = toMs(value);
+    if (startedMs == null) return true;
+    const staleSec = Number(this.env.turnProcessingStaleSec) || DEFAULT_TURN_PROCESSING_STALE_SEC;
+    return this.clock().getTime() - startedMs >= staleSec * 1000;
+  }
+
+  // Release a turn claimed as PROCESSING back to ANSWERING. Race-safe: iff
+  // another path already moved it on, returns null (the caller keeps its own
+  // error outcome). Records one processing_failure whenever the release wins.
+  async _releaseProcessingTurn(interview, exam, turn, {
+    stage = 'ANSWER_PROCESSING',
+    errorCode = 'UNEXPECTED_ERROR',
+    error = null,
+  } = {}) {
+    const now = this.clock();
+    const windowSec = Number(exam.answer_time_limit_sec) || DEFAULT_ANSWER_TIME_LIMIT_SEC;
+    const deadlineMs = Math.min(
+      now.getTime() + windowSec * 1000,
+      toMs(interview.deadline_at),
+    );
+    const released = await this.qaTurnRepository.transitionStatus(
+      turn.qa_turn_id,
+      ['PROCESSING'],
+      'ANSWERING',
+      { answer_deadline_at: new Date(deadlineMs) },
+    );
+    if (!released) return null;
+    await this._recordFailure({
+      interviewId: interview.viva_interview_id,
+      turnId: turn.qa_turn_id,
+      stage,
+      errorCode,
+      message: error ? (error.message || String(error)) : undefined,
+      error,
+    });
+    return released;
+  }
+
+  // Same as _releaseProcessingTurn, but a failed revert is logged instead of
+  // thrown: the caller still has to surface its own failure to the student.
+  // Returns `false` (not null) when the revert itself failed so the caller can
+  // tell it apart from "the turn was already moved on".
+  async _releaseProcessingTurnSafely(interview, exam, turn, options = {}) {
+    try {
+      return await this._releaseProcessingTurn(interview, exam, turn, options);
+    } catch (revertErr) {
+      this.logger?.error?.(
+        { err: revertErr, interviewId: interview.viva_interview_id, turnId: turn.qa_turn_id },
+        'could not release a PROCESSING turn after an unexpected error',
+      );
+      return false;
+    }
   }
 
   // Decision (1) applied lazily: an active interview past its deadline ends
@@ -916,6 +1208,7 @@ class InterviewService {
       answerDeadlineAt: null,
       partialSegments: [],
     }));
+    await this._publishInterview({ ...interview, ...ended }, 'completed');
     return ended;
   }
 
@@ -944,6 +1237,71 @@ class InterviewService {
     return { ended: endedCount };
   }
 
+  // Advance to the next main question, or end the interview when none remains
+  // or the session deadline passed while preparing. Shared by submitAnswer and
+  // the read-path crash recovery. A concurrent caller that loses the unique
+  // (interview_id, sequence_no) insert is answered with the winner's turn, so
+  // two reads can never create two turns.
+  async _advanceToNextMainQuestion({
+    interview, exam, assigned, sequenceNo,
+  }) {
+    const id = interview.viva_interview_id;
+    const index = Number(interview.current_question_index) || 0;
+    const next = assigned.find((a) => Number(a.order_no) === index + 2);
+    if (!next) {
+      return {
+        interview: await this._endInterview(interview, END_REASONS.QUESTIONS_EXHAUSTED),
+        turn: null,
+      };
+    }
+    const prepared = await this._prepareMainTurn(readInterviewQuestion(next), exam);
+    // Final gate: preparation latency must not create a turn past the deadline;
+    // the prepared main question is discarded.
+    if (this._deadlinePassed(interview.deadline_at)) {
+      return {
+        interview: await this._endInterview(interview, END_REASONS.DEADLINE_REACHED),
+        turn: null,
+      };
+    }
+    let result;
+    try {
+      result = await this._run(async (tx) => {
+        const turn = await this.qaTurnRepository.create({
+          interviewId: id,
+          assignedQuestionId: next.assigned_question_id,
+          sequenceNo,
+          turnType: 'MAIN',
+          questionText: prepared.question.content,
+          rationale: prepared.rationale,
+          status: 'ASKED',
+          questionAudioKey: prepared.audioKey,
+          askedAt: this.clock(),
+        }, tx);
+        await this.assignedQuestionRepository.markAsked(next.assigned_question_id, tx);
+        const updated = await this.vivaInterviewRepository.updateProgress(id, {
+          current_question_index: index + 1,
+          current_follow_up_count: 0,
+        }, tx);
+        return { turn, updated };
+      });
+    } catch (err) {
+      if (!err || err.code !== '23505') throw err;
+      // Lost the race to another reader: return the turn it created.
+      const latest = await this.qaTurnRepository.findLatestByInterview(id);
+      const current = await this.vivaInterviewRepository.findById(id);
+      return { interview: current || interview, turn: latest };
+    }
+    if (prepared.ttsError) {
+      await this._recordFailure({
+        interviewId: id,
+        turnId: result.turn.qa_turn_id,
+        stage: 'TTS',
+        error: prepared.ttsError,
+      });
+    }
+    return { interview: result.updated, turn: result.turn };
+  }
+
   // Load question rationale sources and rubric for a main turn, and synthesize
   // its audio. Runs outside any transaction; TTS failure is reported back so
   // the caller can record it once the turn id exists.
@@ -958,13 +1316,20 @@ class InterviewService {
     };
   }
 
-  async _loadQuestionMaterial(question) {
+  async _loadQuestionMaterial(question, client) {
+    if (question?.snapshot_version === 1 || question?.legacy_operational_only) {
+      const sourceRefs = question.source_refs_snapshot || [];
+      return {
+        sourceRefs, rubric: question.rubric_snapshot,
+        sourceChunks: sourceRefs.map((s) => ({ chunkId: s.chunkId, location: s.location, content: s.content })),
+      };
+    }
     let sourceRefs = [];
     if (question && question.source === 'AI' && this.questionSourceRefRepository) {
-      sourceRefs = await this.questionSourceRefRepository.listByQuestionWithMaterial(question.question_id);
+      sourceRefs = await this.questionSourceRefRepository.listByQuestionWithMaterial(question.question_id, client);
     }
     const rubric = question && question.rubric_id != null && this.rubricRepository
-      ? await this.rubricRepository.findById(question.rubric_id)
+      ? await this.rubricRepository.findById(question.rubric_id, client)
       : null;
     return {
       sourceRefs,

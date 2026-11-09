@@ -48,8 +48,10 @@ class QuestionGenerationService {
     embeddingAdapter,
     enqueueJob,
     db,
+    realtimeBus = null,
     logger = console,
   } = {}) {
+    this.realtimeBus = realtimeBus;
     this.db = db;
     this.rubricRepository = rubricRepository;
     this.questionGenerationJobRepository = questionGenerationJobRepository;
@@ -208,6 +210,20 @@ class QuestionGenerationService {
 
     await this.enqueueJob('GENERATE_QUESTIONS', { jobId: job.question_generation_job_id }, { maxAttempts: 3 });
 
+    if (this.realtimeBus) {
+      try {
+        const topic = await this.topicRepository.getById(Number(topicId));
+        this.realtimeBus.publish('question', {
+          action: 'created',
+          generationJobId: job.question_generation_job_id,
+          topicId,
+          subjectId: topic ? topic.subject_id : null,
+          status: 'PENDING',
+        });
+      } catch (err) {
+        this.logger?.warn?.({ err }, 'generation realtime publish failed');
+      }
+    }
     return job;
   }
 

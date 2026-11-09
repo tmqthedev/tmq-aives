@@ -18,8 +18,12 @@ import {
   warmExamSession,
   createExamSessionAsAdmin,
   deleteExamSessionAsAdmin,
+  getExamMonitoring,
 } from '../../services/adminApi';
 import { formatDateTime, fromDateTimeLocal } from '../../shared/utils/formatDate';
+import { subscribeBusinessEvents } from '../../services/businessSocket';
+import { useExamCounts } from '../../hooks/useExamCounts';
+import ExamCounts from '../../components/ExamCounts';
 
 const EMPTY_EXAM = {
   subjectId: '', topicId: '', title: '', opensAt: '', closesAt: '', mainQuestionCount: 3,
@@ -166,6 +170,9 @@ export default function AdminExamSchedule() {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => subscribeBusinessEvents(() => load({ silent: true })), [load]);
+  const examCounts = useExamCounts(getExamMonitoring);
 
   useEffect(() => {
     (async () => {
@@ -343,8 +350,7 @@ export default function AdminExamSchedule() {
                     </Td>
                     <Td>{s.student_count ?? 0}</Td>
                     <Td>
-                      <div>{s.interviews_started ?? 0} {t("started")}</div>
-                      <div style={{ ...muted, fontSize: '0.8125rem' }}>{s.interviews_completed ?? 0} {t("completed")}</div>
+                      <ExamCounts counts={examCounts[s.exam_session_id]} />
                     </Td>
                     <Td><WarmStatus warm={s.warm_status} /></Td>
                     <Td>

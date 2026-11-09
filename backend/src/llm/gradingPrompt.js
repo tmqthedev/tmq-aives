@@ -52,12 +52,14 @@ const EMIT_QUESTION_GRADE_TOOL = {
                     type: 'object',
                     properties: {
                       quote: { type: 'string' },
+                      key_point_index: { type: 'integer', minimum: 0 },
+                      reference_quote: { type: 'string' },
                     },
-                    required: ['quote'],
+                    required: ['quote', 'key_point_index', 'reference_quote'],
                   },
                 },
               },
-              required: ['criterion_id', 'ai_level_id', 'ai_score', 'ai_justification'],
+              required: ['criterion_id', 'ai_level_id', 'ai_score', 'ai_justification', 'evidence'],
             },
           },
           strengths: { type: 'string' },
@@ -90,6 +92,11 @@ function buildSystemPrompt(language) {
     'Evaluate the student answers against the question key points, reference answer, and rubric criteria.',
     'For each criterion, determine the matching performance level, provide a score within that level range,',
     'explain your justification, and quote supporting evidence verbatim from the student answers.',
+    'Each evidence entry must cite a verbatim quote from ONE saved student answer, the zero-based key_point_index it supports, and a verbatim reference_quote from the approved reference answer.',
+    'Only the approved reference answer and key points define correct knowledge. Materials, question wording and model prior knowledge cannot substitute for a student answer.',
+    'Do not award credit for negation, instructions, unrelated statements or unsupported claims. If evidence is absent or uncertain, emit empty evidence for manual review.',
+    'Paraphrases are acceptable only when supported by the saved transcript; do not invent or rewrite quotes to match expected knowledge.',
+    'Use only the saved rubric score scale and listed level ranges. Never invent a different maximum.',
     'Do not penalize obvious speech-to-text recognition errors (phonetic slips or typos).',
     'Grade ONLY what the student actually said. Never give credit for content that appears only in the reference answer or key points.',
     'If the student answers contain nothing relevant to the question (for example "I don\'t know", off-topic talk, or empty answers), pick the lowest performance level for every criterion and give its minimum score.',
@@ -133,7 +140,7 @@ function buildGradingUserPrompt({
     `Reference Answer: ${mainQuestion.reference_answer || mainQuestion.referenceAnswer || 'N/A'}`,
     `Key Points:`,
     ...(Array.isArray(mainQuestion.key_points || mainQuestion.keyPoints)
-      ? (mainQuestion.key_points || mainQuestion.keyPoints).map((kp) => `  * ${kp}`)
+      ? (mainQuestion.key_points || mainQuestion.keyPoints).map((kp, index) => `  * [${index}] ${kp}`)
       : ['  * None specified']),
     '',
     `Student Answer Transcript:`,

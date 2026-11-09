@@ -67,6 +67,39 @@ class QuestionController {
     }
   };
 
+  getRevision = async (req, res, next) => {
+    try {
+      res.json(await this.questionService.getPendingRevision(this._parseQuestionId(req.params.id), req.user));
+    } catch (error) { next(error); }
+  };
+
+  saveRevision = async (req, res, next) => {
+    try {
+      const { patch, expectedVersion, revisionId } = req.body || {};
+      res.json(await this.questionService.saveRevision(this._parseQuestionId(req.params.id), {
+        patch, expectedVersion, revisionId,
+      }, req.user));
+    } catch (error) { next(error); }
+  };
+
+  publishRevision = async (req, res, next) => {
+    try {
+      const { expectedVersion, revisionId } = req.body || {};
+      res.json(await this.questionService.publishRevision(this._parseQuestionId(req.params.id), {
+        expectedVersion, revisionId,
+      }, req.user));
+    } catch (error) { next(error); }
+  };
+
+  discardRevision = async (req, res, next) => {
+    try {
+      const { expectedVersion, revisionId } = req.body || {};
+      res.json(await this.questionService.discardRevision(this._parseQuestionId(req.params.id), {
+        expectedVersion, revisionId,
+      }, req.user));
+    } catch (error) { next(error); }
+  };
+
   remove = async (req, res, next) => {
     try {
       const questionId = this._parseQuestionId(req.params.id);

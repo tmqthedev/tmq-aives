@@ -20,6 +20,14 @@ function buildService({ turns, language = 'VI', llmScore = 6 }) {
             question_content: `Question ${id}`,
             key_points: [`Point ${id}`],
             rubric_id: 5,
+            knowledge_snapshot: {
+              snapshot_version: 1, content: `Question ${id}`, bloom_level: 'UNDERSTAND',
+              reference_answer: 'Đóng gói là che giấu dữ liệu', key_points: ['che giấu dữ liệu'], rubric_id: 5,
+              rubric_snapshot: { rubric_id: 5, max_score: 10, criteria: [{ rubric_criterion_id: 1, rubric_id: 5,
+                criterion_name: 'Accuracy', weight_percent: 100,
+                performance_levels: [{ performance_level_id: 10, criterion_id: 1, label: 'Low',
+                  min_score: 4, max_score: 6, description: 'Lowest level' }] }] },
+            },
           })),
         };
       }
@@ -37,12 +45,18 @@ function buildService({ turns, language = 'VI', llmScore = 6 }) {
     async findByInterviewId() { return result; },
     async updateResult(_id, fields) { result = { ...result, ...fields }; return result; },
     async saveEvaluationsAndCriteria(_id, evals) { saved.push(...evals); },
+    async publishAiGrading(id, evals, fields) {
+      await this.saveEvaluationsAndCriteria(id, evals);
+      return this.updateResult(id, fields);
+    },
   };
   const llmAdapter = {
     async gradeQuestion(input) {
       llmCalls.push(input);
       return {
-        criteria_evaluations: [{ criterion_id: 1, ai_level_id: 10, ai_score: llmScore, ai_justification: 'ok' }],
+        criteria_evaluations: [{ criterion_id: 1, ai_level_id: 10, ai_score: llmScore, ai_justification: 'ok',
+          // Satisfies the evidence gate for the Vietnamese answer used below.
+          evidence: [{ quote: 'che giấu dữ liệu', key_point_index: 0, reference_quote: 'che giấu dữ liệu' }] }],
         confidence: 0.9,
       };
     },

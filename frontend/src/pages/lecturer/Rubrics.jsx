@@ -10,6 +10,7 @@ import {
   deleteRubric,
   cloneRubric,
 } from '../../services/rubricApi';
+import { subscribeBusinessEvents } from '../../services/businessSocket';
 
 const emptyLevel = () => ({ label: '', minScore: 0, maxScore: 0, description: '', orderNo: 1 });
 const emptyCriterion = () => ({
@@ -45,6 +46,8 @@ export default function LecturerRubrics() {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => subscribeBusinessEvents(load, ['rubric']), [load]);
 
   const handleOpenModal = (r = null) => {
     setCurrentRubric(r);

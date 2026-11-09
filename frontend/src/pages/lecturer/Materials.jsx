@@ -8,6 +8,7 @@ import {
   deleteMaterial,
 } from '../../services/materialApi';
 import { getExamSessionOptions } from '../../services/examSessionApi';
+import { subscribeBusinessEvents } from '../../services/businessSocket';
 
 // Materials in these states are still being processed, so the page polls until
 // they settle (READY or FAILED).
@@ -95,6 +96,11 @@ export default function LecturerMaterials() {
   // Reload materials whenever the chosen subject changes.
   useEffect(() => {
     loadMaterials(subjectId);
+  }, [subjectId, loadMaterials]);
+
+  useEffect(() => {
+    if (!subjectId) return undefined;
+    return subscribeBusinessEvents(() => loadMaterials(subjectId), ['material']);
   }, [subjectId, loadMaterials]);
 
   // Poll while any material is still being ingested, and stop once they settle.

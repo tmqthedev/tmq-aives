@@ -70,6 +70,41 @@ class InterviewController {
         timedOut: timedOut === true || timedOut === 'true',
         signals: parseJsonField(signals, 'signals'),
       });
+
+      // Expose the recognized answer text of this turn in the multipart
+      // response too (same shape as the `turn:transcribed` socket event).
+      const transcribedTurn = await this.interviewService.getTranscribedTurn({
+        user: req.user,
+        interviewId: req.params.id,
+        turnId: req.params.turnId,
+      });
+      res.json({ ...result, transcribedTurn });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  getTranscript = async (req, res, next) => {
+    try {
+      const result = await this.interviewService.getTranscript({
+        user: req.user,
+        interviewId: req.params.id,
+      });
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  disputeStt = async (req, res, next) => {
+    try {
+      const { note } = req.body || {};
+      const result = await this.interviewService.disputeStt({
+        user: req.user,
+        interviewId: req.params.id,
+        turnId: req.params.turnId,
+        note,
+      });
       res.json(result);
     } catch (error) {
       next(error);

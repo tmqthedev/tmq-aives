@@ -46,6 +46,59 @@ class QuestionRepository {
     this.db = database;
   }
 
+  async findByIdForUpdate(questionId, client) {
+    const result = await client.query('SELECT * FROM question WHERE question_id = $1 FOR UPDATE', [questionId]);
+    return result.rows[0] || null;
+  }
+
+  async findPendingRevision(questionId, client = this.db) {
+    const result = await client.query(
+      "SELECT * FROM question_revision WHERE question_id = $1 AND status = 'PENDING_REVIEW'",
+      [questionId],
+    );
+    return result.rows[0] || null;
+  }
+
+  // Caller holds the question row lock: every save/publish takes this same lock
+  // before reading the pending revision, including the first-draft race.
+  async savePendingRevision(questionId, { baseVersion, content, actorId, revision }, client) {
+    if (revision) {
+      const result = await client.query(
+        `UPDATE question_revision SET content = $1::jsonb, version = version + 1,
+         updated_by = $2, updated_at = now()
+         WHERE question_revision_id = $3 AND version = $4 AND status = 'PENDING_REVIEW' RETURNING *`,
+        [JSON.stringify(content), actorId, revision.question_revision_id, revision.version],
+      );
+      return result.rows[0] || null;
+    }
+    const result = await client.query(
+      `INSERT INTO question_revision (question_id, base_version, content, created_by, updated_by)
+       VALUES ($1, $2, $3::jsonb, $4, $4) RETURNING *`,
+      [questionId, baseVersion, JSON.stringify(content), actorId],
+    );
+    return result.rows[0];
+  }
+
+  async markRevisionPublished(revisionId, actorId, client) {
+    const result = await client.query(
+      `UPDATE question_revision SET status = 'PUBLISHED', reviewed_by = $2,
+       published_at = now(), updated_at = now()
+       WHERE question_revision_id = $1 AND status = 'PENDING_REVIEW' RETURNING *`,
+      [revisionId, actorId],
+    );
+    return result.rows[0] || null;
+  }
+
+  async markRevisionDiscarded(revisionId, actorId, client) {
+    const result = await client.query(
+      `UPDATE question_revision SET status = 'DISCARDED', reviewed_by = $2,
+       discarded_at = now(), updated_at = now()
+       WHERE question_revision_id = $1 AND status = 'PENDING_REVIEW' RETURNING *`,
+      [revisionId, actorId],
+    );
+    return result.rows[0] || null;
+  }
+
   async findAll() {
     const result = await this.db.query('SELECT * FROM question ORDER BY question_id ASC');
     return result.rows;

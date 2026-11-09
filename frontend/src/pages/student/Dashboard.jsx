@@ -8,10 +8,10 @@ import { Card, CardHeader, CardBody } from '../../components/ui/Card';
 import { Badge } from '../../components/ui/Badge';
 import { LoadingSpinner } from '../../components/ui/Loading';
 import { Feedback } from '../../components/ui/Feedback';
+import DeviceCheck from '../../components/audio/DeviceCheck';
 import { listMyExamSessions, startOrResumeInterview } from '../../services/studentExamApi';
 import { formatDateTime } from '../../shared/utils/formatDate';
-import DeviceCheckModal from '../../components/exam/DeviceCheckModal';
-import { markDeviceCheckPassed } from '../../shared/utils/audioDevices';
+import { useBusinessEvents } from '../../hooks/useBusinessEvents';
 
 export default function StudentDashboard() {
   useLocale();
@@ -20,23 +20,21 @@ export default function StudentDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [startingId, setStartingId] = useState(null);
-  // Exam the student is checking audio devices for; the interview only starts
-  // (and its timer only runs) after the check passes.
-  const [checkingSession, setCheckingSession] = useState(null);
+  const [checkSession, setCheckSession] = useState(null);
   // Captured when the list loads, so render stays pure.
   const [now, setNow] = useState(() => Date.now());
 
-  const loadSessions = useCallback(async () => {
+  const loadSessions = useCallback(async ({ silent = false } = {}) => {
     try {
-      setLoading(true);
-      setError(null);
+      if (!silent) setLoading(true);
+      if (!silent) setError(null);
       const data = await listMyExamSessions();
       setSessions(Array.isArray(data) ? data : []);
       setNow(Date.now());
     } catch (err) {
       setError(err.message || t("Could not load your exam sessions."));
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
@@ -44,15 +42,16 @@ export default function StudentDashboard() {
     loadSessions();
   }, [loadSessions]);
 
+  // Own interview and exam open/close changes (and reconnects) refresh the list.
+  useBusinessEvents(['exam', 'interview'], () => { loadSessions({ silent: true }); });
+
   const handleStartOrResume = async (session) => {
     try {
       setStartingId(session.examSessionId);
       setError(null);
       const result = await startOrResumeInterview(session.examSessionId);
-      markDeviceCheckPassed(result.interviewId);
       navigate(`/student/viva?interviewId=${result.interviewId}`);
     } catch (err) {
-      setCheckingSession(null);
       setError(err.message || t("Failed to start interview."));
       setStartingId(null);
     }
@@ -193,7 +192,7 @@ export default function StudentDashboard() {
                       {session.canStart && (
                         <Button
                           variant="primary"
-                          onClick={() => setCheckingSession(session)}
+                          onClick={() => setCheckSession(session)}
                           disabled={isStarting}
                         >
                           <Play size={18} />
@@ -204,7 +203,7 @@ export default function StudentDashboard() {
                       {session.canResume && (
                         <Button
                           variant="warning"
-                          onClick={() => setCheckingSession(session)}
+                          onClick={() => setCheckSession(session)}
                           disabled={isStarting}
                         >
                           <RotateCw size={18} />
@@ -255,13 +254,18 @@ export default function StudentDashboard() {
         </div>
       )}
 
-      <DeviceCheckModal
-        isOpen={checkingSession != null}
-        examTitle={checkingSession?.title}
-        resuming={!!checkingSession?.canResume}
-        confirming={checkingSession != null && startingId === checkingSession.examSessionId}
-        onClose={() => setCheckingSession(null)}
-        onConfirm={() => handleStartOrResume(checkingSession)}
+      <DeviceCheck
+        isOpen={checkSession != null}
+        onClose={() => setCheckSession(null)}
+        onConfirm={async () => {
+          const sessionToStart = checkSession;
+          setCheckSession(null);
+          if (sessionToStart) {
+            await handleStartOrResume(sessionToStart);
+          }
+        }}
+        isResume={!!checkSession?.canResume}
+        examTitle={checkSession ? `${checkSession.subjectCode || ''} • ${checkSession.title}` : ''}
       />
     </div>
   );

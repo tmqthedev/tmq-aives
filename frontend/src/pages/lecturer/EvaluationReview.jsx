@@ -80,6 +80,26 @@ const BLOOM_BADGE = {
   CREATE: 'primary',
 };
 
+const GRADING_STAGE_LABEL = {
+  QUEUED: 'Queued',
+  PREPARING: 'Preparing',
+  SCORING: 'Scoring',
+  AGGREGATING: 'Aggregating',
+  RETRYING: 'Retrying',
+  FAILED: 'Grading failed',
+  AWAITING_REVIEW: 'Awaiting review',
+};
+
+function gradingProgressLine(result, tFn) {
+  const progress = result && result.progress;
+  if (!progress || !progress.stage) return null;
+  const label = tFn(GRADING_STAGE_LABEL[progress.stage] || progress.stage);
+  if (progress.current != null && progress.total != null) {
+    return `${label} · ${tFn('Question {v0}/{v1}', { v0: progress.current, v1: progress.total })}`;
+  }
+  return label;
+}
+
 export default function LecturerEvaluationReview() {
   useLocale();
   const { id } = useParams();
@@ -139,9 +159,10 @@ export default function LecturerEvaluationReview() {
     };
   }, [fetchDetail]);
 
-  // Polling if status is AI_SCORING
+  // Polling while grading is in flight (queued or scoring)
   useEffect(() => {
-    if (detail?.result?.status === 'AI_SCORING') {
+    const active = detail?.result?.status === 'AI_SCORING' || detail?.result?.status === 'PENDING';
+    if (active) {
       if (!pollTimerRef.current) {
         pollTimerRef.current = setInterval(() => {
           fetchDetail(true);
@@ -335,6 +356,7 @@ export default function LecturerEvaluationReview() {
   const canGrade = detail.canGrade !== false && result.canGrade !== false;
   const isFinalized = result.status === 'FINALIZED';
   const isScoring = result.status === 'AI_SCORING';
+  const isPending = result.status === 'PENDING';
   const isFlagged = result.status === 'FLAGGED';
 
   const currentEval = evaluations[activeQuestionIdx] || null;
@@ -377,6 +399,12 @@ export default function LecturerEvaluationReview() {
                   <Clock size={14} style={{ marginRight: '4px' }} /> {t("AI đang chấm...")}</Badge>
               )}
             </div>
+            {(isScoring || isPending) && result.progress && (
+              <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.8125rem', color: 'var(--text-muted)' }}>
+                <Clock size={12} style={{ marginRight: '4px', verticalAlign: '-2px' }} />
+                {gradingProgressLine(result, t)}
+              </p>
+            )}
             <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: '0.9rem' }}>
               <strong>{result.student_name}</strong> ({result.student_code || t("N/A")}) &bull; {result.session_title} {t("• Môn:")} {result.subject_name || t("N/A")} {result.topic_name ? `(${result.topic_name})` : ''}
             </p>

@@ -99,6 +99,12 @@ class FakeSubjectRepo {
     }));
   }
 
+  async listLecturers(subjectId) {
+    return (this.lecturers.get(Number(subjectId)) || []).map((id) => ({
+      app_user_id: id, role: 'LECTURER', status: 'ACTIVE',
+    }));
+  }
+
   async create({ code, name }) {
     const row = { subject_id: this.nextId++, code, name };
     this.subjects.set(row.subject_id, row);
@@ -180,7 +186,7 @@ class FakeJobRepo {
   }
 }
 
-function build({ users = [], subjects = [] } = {}) {
+function build({ users = [], subjects = [], realtimeBus = null } = {}) {
   const appUserRepository = new FakeUserRepo(users);
   const subjectRepository = new FakeSubjectRepo(subjects);
   const passwordTokenRepository = new FakeTokenRepo();
@@ -191,6 +197,7 @@ function build({ users = [], subjects = [] } = {}) {
     passwordTokenRepository,
     backgroundJobRepository,
     env: TEST_ENV,
+    realtimeBus,
   });
   return {
     service, appUserRepository, subjectRepository, passwordTokenRepository, backgroundJobRepository,
@@ -227,6 +234,14 @@ test('createLecturer enqueues a SET email with a link and no plaintext password'
   const serialized = JSON.stringify(job.payload).toLowerCase();
   assert.equal(serialized.includes('password_hash'), false);
   assert.equal('password' in job.payload, false);
+});
+
+test('admin user writes publish ID-only invalidations after persistence', async () => {
+  const events = [];
+  const realtimeBus = { publish: (entity, payload) => events.push({ entity, ...payload }) };
+  const { service } = build({ realtimeBus });
+  const created = await service.createUser({ email: 'safe@aives.local', fullName: 'Private Name', role: 'LECTURER' });
+  assert.deepEqual(events, [{ entity: 'user', action: 'created', userId: created.id }]);
 });
 
 test('createLecturer rejects a duplicate email', async () => {
@@ -353,12 +368,19 @@ test('deleteSubject refuses a subject with content (SUBJECT_IN_USE + counts); ar
 });
 
 test('assignLecturers replaces the full set', async () => {
-  const { service, subjectRepository } = build({ subjects: [{ subject_id: 1, code: 'CS', name: 'CS' }] });
+  const events = [];
+  const realtimeBus = { publish: (entity, payload) => events.push({ entity, ...payload }) };
+  const { service, subjectRepository } = build({
+    subjects: [{ subject_id: 1, code: 'CS', name: 'CS' }], realtimeBus,
+  });
   await service.assignLecturers(1, [10, 11]);
   assert.deepEqual(subjectRepository.lecturers.get(1), [10, 11]);
   const result = await service.assignLecturers(1, [12]);
   assert.deepEqual(result.lecturerIds, [12]);
   assert.deepEqual(subjectRepository.lecturers.get(1), [12]);
+  assert.deepEqual(events.at(-1), {
+    entity: 'subject', action: 'updated', subjectId: 1, recipientUserIds: [10, 11, 12],
+  });
 });
 
 test('assignStudents enrolls students by codes all-or-nothing', async () => {

@@ -8,6 +8,11 @@ import { apiRequest } from './authApi';
 // List the lecturer's exam sessions. The backend scopes by the authenticated
 // lecturer (own sessions + in-scope subjects) and returns the raw exam_session
 // rows.
+// Monitoring aggregate: { counts: { [examSessionId]: { inProgress, completed } } }.
+export function getExamMonitoring() {
+  return apiRequest('/exam-sessions/monitoring');
+}
+
 export function listExamSessions() {
   return apiRequest('/exam-sessions');
 }

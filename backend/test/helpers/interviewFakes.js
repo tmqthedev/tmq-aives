@@ -103,6 +103,7 @@ class FakeInterviewDb {
     };
 
     this.questionRepository = {
+      async findByIdForUpdate(id) { return copy(db.questions.get(Number(id)) || null); },
       async findById(id) { return copy(db.questions.get(Number(id)) || null); },
     };
     this.questionSourceRefRepository = {
@@ -175,12 +176,13 @@ class FakeInterviewDb {
     };
 
     this.assignedQuestionRepository = {
-      async createMany(interviewId, questionIds) {
+      async createMany(interviewId, questionIds, _client, snapshots) {
         return questionIds.map((qid, i) => {
           const row = {
             assigned_question_id: db.nextId(),
             interview_id: interviewId,
             question_id: qid,
+            knowledge_snapshot: copy(snapshots[i]),
             order_no: i + 1,
             is_asked: false,
           };
@@ -253,6 +255,7 @@ class FakeInterviewDb {
           question_audio_key: p.questionAudioKey ?? null,
           played_at: null,
           answer_deadline_at: null,
+          processing_started_at: p.processingStartedAt ?? null,
           retry_count: p.retryCount ?? p.retry_count ?? 0,
         };
         db.turns.set(row.qa_turn_id, row);
@@ -330,6 +333,9 @@ class FakeInterviewDb {
           db.results.set(interviewId, { viva_result_id: db.nextId(), interview_id: interviewId, status: 'PENDING' });
         }
         return copy(db.results.get(interviewId));
+      },
+      async findByInterviewId(interviewId) {
+        return copy(db.results.get(Number(interviewId)) || null);
       },
       async isExaminerOrCreator() {
         return true;

@@ -19,8 +19,12 @@ import {
   scheduleExamSession,
   unscheduleExamSession,
   closeExamSession,
+  getExamMonitoring,
 } from '../../services/examSessionApi';
 import { formatDateTime, toDateTimeLocal, fromDateTimeLocal } from '../../shared/utils/formatDate';
+import { subscribeBusinessEvents } from '../../services/businessSocket';
+import { useExamCounts } from '../../hooks/useExamCounts';
+import ExamCounts from '../../components/ExamCounts';
 
 const BLOOM_LEVELS = ['REMEMBER', 'UNDERSTAND', 'APPLY', 'ANALYZE'];
 const BLOOM_LABELS = {
@@ -402,6 +406,12 @@ export default function LecturerExamSessions() {
     loadSessions();
   }, [loadOptions, loadSessions]);
 
+  useEffect(() => subscribeBusinessEvents(() => {
+    loadOptions();
+    loadSessions();
+  }), [loadOptions, loadSessions]);
+  const examCounts = useExamCounts(getExamMonitoring);
+
   const resetCreateForm = () => {
     setTitle('');
     setSubjectId('');
@@ -714,13 +724,14 @@ export default function LecturerExamSessions() {
                 <Th>{t("Window")}</Th>
                 <Th>{t("Config")}</Th>
                 <Th>{t("Status")}</Th>
+                <Th>{t("Students taking the exam")}</Th>
                 <Th style={{ textAlign: 'right' }}>{t("Actions")}</Th>
               </Tr>
             </Thead>
             <Tbody>
               {sessions.length === 0 && (
                 <Tr>
-                  <Td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>{t("No exam sessions yet.")}</Td>
+                  <Td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>{t("No exam sessions yet.")}</Td>
                 </Tr>
               )}
               {sessions.map((s) => (
@@ -747,6 +758,7 @@ export default function LecturerExamSessions() {
                   <Td>
                     <Badge type={STATUS_BADGE[s.status] || 'info'}>{enumLabel(s.status)}</Badge>
                   </Td>
+                  <Td><ExamCounts counts={examCounts[s.exam_session_id]} /></Td>
                   <Td style={{ textAlign: 'right' }}>
                     <Button variant="secondary" icon={<UsersIcon size={16} />} onClick={() => openDetails(s)}>{t("Manage")}</Button>
                   </Td>
