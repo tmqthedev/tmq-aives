@@ -226,6 +226,14 @@ class BedrockLlmAdapter {
         for (const block of blocks) {
           if (block?.toolUse?.name === 'emit_follow_up_decision' && block.toolUse.input) {
             const decision = block.toolUse.input;
+            if (decision.next_action === 'ASK_FOLLOW_UP'
+              && (typeof decision.follow_up_question !== 'string' || !decision.follow_up_question.trim())) {
+              const alias = ['question', 'followUpQuestion', 'follow_up', 'followup_question']
+                .map((key) => decision[key])
+                .find((value) => typeof value === 'string' && value.trim());
+              if (alias) decision.follow_up_question = alias;
+              else break;
+            }
             const rationale = decision.rationale;
             // Nova occasionally omits this required lecturer-only field while
             // supplying a substantive why. Reuse its own wording; the engine

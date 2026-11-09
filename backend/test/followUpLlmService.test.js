@@ -78,6 +78,8 @@ test('FOLLOW_UP_TOOL requires next_action and rationale', () => {
   assert.ok(schema.required.includes('next_action'));
   assert.ok(schema.required.includes('rationale'));
   assert.deepEqual(schema.properties.next_action.enum, ['ASK_FOLLOW_UP', 'NEXT_MAIN_QUESTION']);
+  assert.match(schema.properties.follow_up_question.description, /REQUIRED.*non-empty.*exam language/i);
+  assert.match(schema.properties.follow_up_question.description, /null.*NEXT_MAIN_QUESTION/);
 });
 
 test('mock: a missing key point -> ASK with fully verified grounding and no key point in the question', async () => {
@@ -179,4 +181,68 @@ test('bedrock fills an omitted lecturer-only purpose from Nova why before engine
   assert.equal(decision.rationale.purpose, raw.rationale.why);
   assert.equal(parseFollowUpDecision(decision, { referenceAnswer: 'Example answer',
     keyPoints: KEY_POINTS }).ok, true);
+});
+
+function bedrockDecisionResponse(decision) {
+  return { output: { message: { content: [
+    { toolUse: { name: 'emit_follow_up_decision', input: decision } },
+  ] } } };
+}
+
+function validAskDecision(over = {}) {
+  return {
+    next_action: 'ASK_FOLLOW_UP',
+    follow_up_reason: 'INCOMPLETE',
+    covered_key_points: [],
+    missing_key_points: ['reliable ordered delivery'],
+    rationale: {
+      why: 'The answer is incomplete.',
+      purpose: 'Clarify the answer.',
+      target_key_points: ['reliable ordered delivery'],
+      target_criteria: ['Accuracy'],
+      grounding: [],
+      synthesis: 'Ask for more detail.',
+    },
+    ...over,
+  };
+}
+
+test('bedrock maps a nonblank question alias to follow_up_question', async () => {
+  const adapter = new BedrockLlmAdapter({ env: { awsRegion: 'ap-southeast-1' } });
+  adapter._client = { send: async () => bedrockDecisionResponse(validAskDecision({
+    follow_up_question: '  ', followUpQuestion: 'Could you explain that further? ',
+  })) };
+  const decision = await adapter.decideFollowUp(input());
+  assert.equal(decision.follow_up_question, 'Could you explain that further? ');
+});
+
+test('bedrock retries an ASK decision missing its question and returns the next valid decision', async () => {
+  const adapter = new BedrockLlmAdapter({ env: { awsRegion: 'ap-southeast-1' } });
+  const valid = validAskDecision({ follow_up_question: 'Could you explain that further?' });
+  let calls = 0;
+  adapter._client = { send: async () => {
+    calls += 1;
+    return bedrockDecisionResponse(calls === 1 ? validAskDecision() : valid);
+  } };
+  const decision = await adapter.decideFollowUp(input());
+  assert.equal(calls, 2);
+  assert.equal(decision.follow_up_question, valid.follow_up_question);
+});
+
+test('bedrock leaves NEXT_MAIN_QUESTION with a null question untouched', async () => {
+  const adapter = new BedrockLlmAdapter({ env: { awsRegion: 'ap-southeast-1' } });
+  const moveOn = {
+    next_action: 'NEXT_MAIN_QUESTION', follow_up_question: null,
+    follow_up_reason: null, covered_key_points: KEY_POINTS, missing_key_points: [],
+    rationale: { why: 'Complete.', purpose: 'Complete.', target_key_points: [],
+      target_criteria: [], grounding: [], synthesis: 'Move on.' },
+  };
+  let calls = 0;
+  adapter._client = { send: async () => {
+    calls += 1;
+    return bedrockDecisionResponse(moveOn);
+  } };
+  const decision = await adapter.decideFollowUp(input());
+  assert.equal(calls, 1);
+  assert.equal(decision.follow_up_question, null);
 });
