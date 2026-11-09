@@ -1164,3 +1164,173 @@ test('onTranscribed: not called when STT fails', async () => {
   assert.deepEqual(payloads, []);
   assert.equal(world.db.turns.get(view.currentTurn.turnId).status, 'ANSWERING');
 });
+
+// --- crash recovery: stuck PROCESSING (defect A) -------------------------------
+
+test('defect A: an unexpected error after the claim releases the turn and a resubmit succeeds', async () => {
+  const world = buildWorld();
+  const view = await start(world);
+  await play(world, view);
+  const turnId = view.currentTurn.turnId;
+
+  const originalUpdate = world.db.qaTurnRepository.update;
+  let failOnce = true;
+  world.db.qaTurnRepository.update = async (...args) => {
+    if (failOnce) {
+      failOnce = false;
+      throw new Error('qa_turn write failed');
+    }
+    return originalUpdate(...args);
+  };
+
+  await expectError(
+    world.service.submitAnswer({
+      user: STUDENT,
+      interviewId: view.interviewId,
+      turnId,
+      transcript: { text: FULL_ANSWER },
+    }),
+    503,
+    'TURN_PROCESSING_FAILED',
+  );
+
+  const released = world.db.turns.get(turnId);
+  assert.equal(released.status, 'ANSWERING');
+  assert.equal(released.retry_count, 0);
+  // min(now + answer_time_limit_sec, interview.deadline_at) = 08:00 + 120 s.
+  assert.equal(new Date(released.answer_deadline_at).toISOString(), '2026-03-01T08:02:00.000Z');
+  const recorded = failures(world, 'ANSWER_PROCESSING');
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0].error_code, 'UNEXPECTED_ERROR');
+  assert.equal(recorded[0].turn_id, turnId);
+
+  // The student is not stuck: the same turn can be submitted again.
+  const answered = await answer(world, view, FULL_ANSWER);
+  assert.equal(world.db.turns.get(turnId).status, 'ANSWERED');
+  assert.notEqual(answered.currentTurn.turnId, turnId);
+});
+
+test('defect A: an STT_FAILED release is not turned into TURN_PROCESSING_FAILED', async () => {
+  const world = buildWorld();
+  const view = await start(world);
+  await play(world, view);
+  world.stt.transcribe = async () => { throw new Error('stt down'); };
+
+  await expectError(
+    answer(world, view, undefined, {
+      transcript: undefined,
+      audio: Buffer.from(PARTIAL_ANSWER),
+    }),
+    502,
+    'STT_FAILED',
+  );
+
+  assert.equal(world.db.turns.get(view.currentTurn.turnId).status, 'ANSWERING');
+  assert.equal(failures(world, 'ANSWER_PROCESSING').length, 0);
+});
+
+// --- crash recovery: stale PROCESSING on read (defect A, process death) -------
+
+test('stale PROCESSING older than the threshold is released on getCurrentState', async () => {
+  const world = buildWorld();
+  const view = await start(world);
+  await play(world, view);
+  const turn = world.db.turns.get(view.currentTurn.turnId);
+  turn.status = 'PROCESSING';
+  turn.processing_started_at = new Date(Date.parse(START_ISO) - 181 * 1000);
+
+  const state = assertStudentSafeView(world, await world.service.getCurrentState({
+    user: STUDENT, interviewId: view.interviewId,
+  }));
+
+  const released = world.db.turns.get(turn.qa_turn_id);
+  assert.equal(released.status, 'ANSWERING');
+  assert.equal(released.retry_count, 0);
+  assert.equal(new Date(released.answer_deadline_at).toISOString(), '2026-03-01T08:02:00.000Z');
+  assert.equal(state.currentTurn.status, 'ANSWERING');
+  const recorded = failures(world, 'ANSWER_PROCESSING');
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0].error_code, 'STALE_PROCESSING');
+});
+
+test('a fresh PROCESSING is left alone; a legacy NULL claim is treated as stale', async () => {
+  const world = buildWorld();
+  const view = await start(world);
+  await play(world, view);
+  const turn = world.db.turns.get(view.currentTurn.turnId);
+  turn.status = 'PROCESSING';
+  turn.processing_started_at = new Date(START_ISO);
+
+  const fresh = assertStudentSafeView(world, await world.service.getCurrentState({
+    user: STUDENT, interviewId: view.interviewId,
+  }));
+  assert.equal(world.db.turns.get(turn.qa_turn_id).status, 'PROCESSING');
+  assert.equal(fresh.currentTurn.status, 'PROCESSING');
+  assert.equal(failures(world, 'ANSWER_PROCESSING').length, 0);
+
+  // Rows claimed before migration 036 have no processing_started_at.
+  turn.processing_started_at = null;
+  const recovered = assertStudentSafeView(world, await world.service.getCurrentState({
+    user: STUDENT, interviewId: view.interviewId,
+  }));
+  assert.equal(world.db.turns.get(turn.qa_turn_id).status, 'ANSWERING');
+  assert.equal(recovered.currentTurn.status, 'ANSWERING');
+  assert.equal(failures(world, 'ANSWER_PROCESSING')[0].error_code, 'STALE_PROCESSING');
+});
+
+// --- crash recovery: active interview with no open turn (defect B) ------------
+
+test('ANSWERED without a next turn: getCurrentState creates exactly one next question', async () => {
+  const world = buildWorld();
+  const view = await start(world);
+  await play(world, view);
+  const answered = await answer(world, view, '');
+  assert.equal(answered.currentTurn.status, 'ASKED');
+
+  // Simulate a crash after the answer was persisted but before the next turn
+  // was created: the turn and its index bump never happened.
+  const persisted = turns(world, view);
+  assert.equal(persisted.length, 2);
+  world.db.turns.delete(persisted[persisted.length - 1].qa_turn_id);
+  world.db.interviews.get(view.interviewId).current_question_index = 0;
+
+  // A just-answered turn may still be waiting on the follow-up decision.
+  const fresh = await world.service.getCurrentState({ user: STUDENT, interviewId: view.interviewId });
+  assert.equal(turns(world, view).length, 1);
+  assert.equal(fresh.currentTurn?.status === 'ASKED', false);
+
+  persisted[0].answer_ended_at = new Date(0);
+  const first = assertStudentSafeView(world, await world.service.getCurrentState({
+    user: STUDENT, interviewId: view.interviewId,
+  }));
+  const afterFirst = turns(world, view);
+  assert.equal(afterFirst.length, 2);
+  assert.equal(first.currentTurn.status, 'ASKED');
+  assert.equal(first.currentTurn.questionText, afterFirst[1].question_text);
+
+  // Idempotent: a second read must not create another turn.
+  const second = assertStudentSafeView(world, await world.service.getCurrentState({
+    user: STUDENT, interviewId: view.interviewId,
+  }));
+  assert.equal(turns(world, view).length, 2);
+  assert.equal(second.currentTurn.turnId, first.currentTurn.turnId);
+});
+
+test('ANSWERED without a next turn on the last question: the interview ends normally', async () => {
+  const world = buildWorld({ exam: { main_question_count: 1 } });
+  const view = await start(world);
+  await play(world, view);
+  // Crash after the answer was persisted but before the end was: the interview
+  // is still active and its only turn is ANSWERED.
+  const turn = world.db.turns.get(view.currentTurn.turnId);
+  turn.status = 'ANSWERED';
+  turn.answer_text = 'done';
+
+  const ended = assertStudentSafeView(world, await world.service.getCurrentState({
+    user: STUDENT, interviewId: view.interviewId,
+  }));
+  assert.equal(ended.status, 'COMPLETED');
+  assert.equal(ended.endReason, 'QUESTIONS_EXHAUSTED');
+  assert.equal(turns(world, view).length, 1);
+  assert.equal(world.enqueueJob.jobs.filter((j) => j.type === 'GRADE_INTERVIEW').length, 1);
+});

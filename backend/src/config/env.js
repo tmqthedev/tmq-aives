@@ -64,5 +64,6 @@ module.exports = {
   jobLockTimeoutMs: Number(process.env.JOB_LOCK_TIMEOUT_MS || 600000),
   interviewSweepIntervalSec: Number(process.env.INTERVIEW_SWEEP_INTERVAL_SEC || 60),
   interviewSweepGraceSec: Number(process.env.INTERVIEW_SWEEP_GRACE_SEC || 30),
+  turnProcessingStaleSec: Number(process.env.TURN_PROCESSING_STALE_SEC || 180),
   migrationsDir: process.env.MIGRATIONS_DIR || path.resolve(__dirname, '..', '..', 'db', 'migrations'),
 };

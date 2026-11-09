@@ -255,6 +255,7 @@ class FakeInterviewDb {
           question_audio_key: p.questionAudioKey ?? null,
           played_at: null,
           answer_deadline_at: null,
+          processing_started_at: p.processingStartedAt ?? null,
           retry_count: p.retryCount ?? p.retry_count ?? 0,
         };
         db.turns.set(row.qa_turn_id, row);
