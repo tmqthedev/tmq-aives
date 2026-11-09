@@ -1004,5 +1004,20 @@
   "Microphone thu âm": "Recording microphone",
   "Không thể đổi microphone khi đang ghi âm câu trả lời.": "Cannot change microphone while recording an answer.",
   "Loa / Thiết bị phát": "Speaker / Output device",
-  "Đóng": "Close"
+  "Đóng": "Close",
+  "This result is finalized. Reopen it to make changes.": "This result is finalized. Reopen it to make changes.",
+  "This exam session has already closed.": "This exam session has already closed.",
+  "This exam session is not open.": "This exam session is not open.",
+  "This exam session has not started yet.": "This exam session has not started yet.",
+  "Exam session not found.": "Exam session not found.",
+  "Interview not found.": "Interview not found.",
+  "The requested record was not found.": "The requested record was not found.",
+  "You are not on the roster for this exam session.": "You are not on the roster for this exam session.",
+  "The question bank has changed. Please try starting again.": "The question bank has changed. Please try starting again.",
+  "File storage error. Please try again.": "File storage error. Please try again.",
+  "Topic not found.": "Topic not found.",
+  "Only answered questions can be disputed.": "Only answered questions can be disputed.",
+  "This is not the current question.": "This is not the current question.",
+  "Turn not found.": "Turn not found.",
+  "Could not process the answer; please answer again.": "Could not process the answer; please answer again."
 }
